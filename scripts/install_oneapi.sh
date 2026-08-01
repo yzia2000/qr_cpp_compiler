@@ -1,0 +1,85 @@
+#!/usr/bin/env bash
+# Installs the Intel oneAPI DPC++/C++ compiler (icpx).
+#
+# Primary route: Intel's apt repository (standard, recommended).
+# Fallback route (restricted networks where apt.repos.intel.com is blocked):
+# pull the `intel/oneapi-basekit` Docker Hub image layers anonymously with
+# curl and stream-extract only the compiler component into /opt/intel/oneapi.
+#
+# Note: oneAPI is intentionally OUTSIDE the nix flake — icpx is not packaged
+# in nixpkgs (https://github.com/NixOS/nixpkgs/issues/367722). The exact
+# compiler version is recorded into benchmark results JSON instead.
+set -euo pipefail
+
+SUDO=""
+[ "$(id -u)" -ne 0 ] && SUDO="sudo"
+
+if command -v icpx >/dev/null 2>&1; then
+    echo "icpx already on PATH: $(icpx --version | head -1)"
+    exit 0
+fi
+if [ -f /opt/intel/oneapi/setvars.sh ]; then
+    echo "oneAPI already at /opt/intel/oneapi — run: source /opt/intel/oneapi/setvars.sh"
+    exit 0
+fi
+
+apt_route() {
+    echo "==> Trying Intel apt repository"
+    wget -qO- --timeout=15 https://apt.repos.intel.com/intel-gpg-keys/GPG-PUB-KEY-INTEL-SW-PRODUCTS.PUB \
+        | gpg --dearmor | $SUDO tee /usr/share/keyrings/oneapi-archive-keyring.gpg >/dev/null
+    echo "deb [signed-by=/usr/share/keyrings/oneapi-archive-keyring.gpg] https://apt.repos.intel.com/oneapi all main" \
+        | $SUDO tee /etc/apt/sources.list.d/oneAPI.list >/dev/null
+    $SUDO apt-get update -qq
+    $SUDO apt-get install -y intel-oneapi-compiler-dpcpp-cpp
+}
+
+docker_layer_route() {
+    echo "==> Falling back to Docker Hub layer extraction (intel/oneapi-basekit)"
+    local repo="intel/oneapi-basekit" tag="latest"
+    local tok manifest
+    tok=$(curl -fsS "https://auth.docker.io/token?service=registry.docker.io&scope=repository:${repo}:pull" \
+        | python3 -c "import json,sys;print(json.load(sys.stdin)['token'])")
+    manifest=$(curl -fsS -H "Authorization: Bearer $tok" \
+        -H "Accept: application/vnd.docker.distribution.manifest.v2+json" \
+        "https://registry-1.docker.io/v2/${repo}/manifests/${tag}")
+    # The oneAPI install is in the largest layer; extract only what icpx needs.
+    local digest
+    digest=$(printf '%s' "$manifest" | python3 -c "
+import json,sys
+m=json.load(sys.stdin)
+print(max(m['layers'], key=lambda l: l['size'])['digest'])")
+    echo "==> Streaming layer $digest (~4.2 GB compressed) into /opt/intel"
+    $SUDO mkdir -p /opt
+    for attempt in 1 2 3; do
+        if curl -fsSL -H "Authorization: Bearer $tok" \
+            "https://registry-1.docker.io/v2/${repo}/blobs/${digest}" \
+            | gunzip \
+            | $SUDO tar -x -C / \
+                  opt/intel/oneapi/setvars.sh \
+                  opt/intel/oneapi/common \
+                  opt/intel/oneapi/compiler \
+                  opt/intel/oneapi/tbb \
+                  opt/intel/oneapi/umf 2>/dev/null; then
+            return 0
+        fi
+        echo "attempt $attempt failed; retrying in $((attempt*10))s" >&2
+        sleep $((attempt*10))
+        tok=$(curl -fsS "https://auth.docker.io/token?service=registry.docker.io&scope=repository:${repo}:pull" \
+            | python3 -c "import json,sys;print(json.load(sys.stdin)['token'])")
+    done
+    echo "layer extraction failed after 3 attempts" >&2
+    return 1
+}
+
+if ! apt_route; then
+    $SUDO rm -f /etc/apt/sources.list.d/oneAPI.list
+    docker_layer_route
+fi
+
+echo "==> Verifying"
+set +u
+# shellcheck disable=SC1091
+source /opt/intel/oneapi/setvars.sh --force >/dev/null
+set -u
+icpx --version | head -1
+echo "OK. Add to your shell: source /opt/intel/oneapi/setvars.sh"

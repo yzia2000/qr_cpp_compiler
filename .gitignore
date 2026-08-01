@@ -1,0 +1,11 @@
+build-*/
+data/
+results/*.json
+results/*.npz
+results/*.md
+.venv/
+__pycache__/
+*.pyc
+.cache/
+oneapi_installer/
+.direnv/
