@@ -15,8 +15,9 @@ import sys
 import numpy as np
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
-VARIANTS = ["gcc-strict", "gcc-fast", "clang-strict", "clang-fast",
-            "icpx-strict", "icpx-fast"]
+VARIANTS = ["gcc-strict", "gcc-fast", "gcc-fast-zmm",
+            "clang-strict", "clang-fast", "clang-fast-zmm",
+            "icpx-strict", "icpx-fast", "icpx-fast-zmm"]
 IV_TOL_STRICT = 1e-9      # vol points, IEEE builds must agree to fp noise
 IV_TOL_FAST = 5e-5        # vol points, relaxed-FP drift budget
 CONV_TOL = 1e-4           # fraction of quotes allowed to flip convergence

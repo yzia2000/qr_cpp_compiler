@@ -12,8 +12,9 @@ import sys
 import time
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
-VARIANTS = ["gcc-strict", "gcc-fast", "clang-strict", "clang-fast",
-            "icpx-strict", "icpx-fast"]
+VARIANTS = ["gcc-strict", "gcc-fast", "gcc-fast-zmm",
+            "clang-strict", "clang-fast", "clang-fast-zmm",
+            "icpx-strict", "icpx-fast", "icpx-fast-zmm"]
 
 
 def run_variant(variant, pcap, reps):

@@ -58,6 +58,14 @@ math-heavy equity-volatility quant research pipeline.
 | clang-fast | `-O3 -march=native -ffast-math -fveclib=libmvec` |
 | icpx-strict | `-O3 -xHost -fp-model=precise` |
 | icpx-fast | `-O3 -xHost -fp-model=fast -fimf-precision=high` |
+| gcc-fast-zmm | gcc-fast + `-mprefer-vector-width=512` |
+| clang-fast-zmm | clang-fast + `-mprefer-vector-width=512` |
+| icpx-fast-zmm | icpx-fast + `-qopt-zmm-usage=high` |
+
+- The `-zmm` variants force full 512-bit vectors; all three compilers default
+  to 256-bit on AVX-512 hardware to avoid license-based frequency throttling —
+  a heuristic tuned for older silicon and mixed workloads, worth challenging on
+  a dedicated math pipeline running on modern cores.
 
 ## Results
 
@@ -112,11 +120,20 @@ math-heavy equity-volatility quant research pipeline.
   `remark: loop not vectorized` on the Newton loop (scalar `erf` call blocks it).
 - `nm -D build-gcc-fast/qr_pipeline*.so | grep _ZGV` → empty (no libmvec
   vector entry points; gcc-fast's IV gain is scalar fast-math codegen).
+- zmm variants: `build-icpx-fast-zmm` imports `__svml_erf8/exp8/log8` (8-wide)
+  and its greeks/SVI objects carry 136/219 zmm instructions vs 0 at default
+  width; the gcc/clang `-mprefer-vector-width=512` builds emit a single zmm
+  zeroing instruction — with no vector `erf` there is nothing to widen.
+- No compiler vectorizes the Newton IV loop itself (data-dependent iteration
+  state); icpx's IV edge over clang comes from libimf's faster *scalar*
+  erf/exp, and the SVML `*4`/`*8` calls belong to the greeks/SVI sweeps.
 
 ## Methodology notes
 
-- 4-vCPU Intel Xeon (Sapphire-Rapids-class, AVX-512+FMA), shared cloud host:
-  numbers are relative comparisons from one session on one box, not absolutes.
+- 4-vCPU KVM guest on a 5th-gen Xeon Scalable — Emerald Rapids, family 6
+  model 207 (hypervisor masks the retail branding), full AVX-512+FP16+AMX
+  exposed. Shared cloud host: numbers are relative comparisons from one
+  session on one box, not absolutes.
 - Median of 7 reps after 1 warmup, fresh subprocess per variant, 5 s settle
   between variants, single-threaded kernels, identical fixed work per build.
 - Parse stage (mmap + decode, memory-bound) is timed but excluded from the

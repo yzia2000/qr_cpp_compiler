@@ -42,6 +42,24 @@
       "inherits": "base",
       "binaryDir": "${sourceDir}/build-icpx-fast",
       "cacheVariables": { "CMAKE_CXX_COMPILER": "icpx", "QR_FAST_MATH": "ON" }
+    },
+    {
+      "name": "gcc-fast-zmm",
+      "inherits": "base",
+      "binaryDir": "${sourceDir}/build-gcc-fast-zmm",
+      "cacheVariables": { "CMAKE_CXX_COMPILER": "g++", "QR_FAST_MATH": "ON", "QR_ZMM": "ON" }
+    },
+    {
+      "name": "clang-fast-zmm",
+      "inherits": "base",
+      "binaryDir": "${sourceDir}/build-clang-fast-zmm",
+      "cacheVariables": { "CMAKE_CXX_COMPILER": "clang++", "QR_FAST_MATH": "ON", "QR_ZMM": "ON" }
+    },
+    {
+      "name": "icpx-fast-zmm",
+      "inherits": "base",
+      "binaryDir": "${sourceDir}/build-icpx-fast-zmm",
+      "cacheVariables": { "CMAKE_CXX_COMPILER": "icpx", "QR_FAST_MATH": "ON", "QR_ZMM": "ON" }
     }
   ],
   "buildPresets": [
@@ -50,6 +68,9 @@
     { "name": "clang-strict", "configurePreset": "clang-strict" },
     { "name": "clang-fast", "configurePreset": "clang-fast" },
     { "name": "icpx-strict", "configurePreset": "icpx-strict" },
-    { "name": "icpx-fast", "configurePreset": "icpx-fast" }
+    { "name": "icpx-fast", "configurePreset": "icpx-fast" },
+    { "name": "gcc-fast-zmm", "configurePreset": "gcc-fast-zmm" },
+    { "name": "clang-fast-zmm", "configurePreset": "clang-fast-zmm" },
+    { "name": "icpx-fast-zmm", "configurePreset": "icpx-fast-zmm" }
   ]
 }

@@ -8,9 +8,9 @@ if [ -f /opt/intel/oneapi/setvars.sh ] && ! command -v icpx >/dev/null 2>&1; the
     set +u; source /opt/intel/oneapi/setvars.sh --force >/dev/null 2>&1; set -u
 fi
 
-PRESETS=(gcc-strict gcc-fast clang-strict clang-fast)
+PRESETS=(gcc-strict gcc-fast gcc-fast-zmm clang-strict clang-fast clang-fast-zmm)
 if command -v icpx >/dev/null 2>&1; then
-    PRESETS+=(icpx-strict icpx-fast)
+    PRESETS+=(icpx-strict icpx-fast icpx-fast-zmm)
 else
     echo "WARNING: icpx not found - skipping icpx presets (run scripts/install_oneapi.sh)" >&2
 fi
