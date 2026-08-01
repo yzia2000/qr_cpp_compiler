@@ -34,14 +34,28 @@ apt_route() {
 }
 
 docker_layer_route() {
-    echo "==> Falling back to Docker Hub layer extraction (intel/oneapi-basekit)"
+    # Pulls the compiler out of the intel/oneapi-basekit image, layer by layer,
+    # with plain curl (no docker daemon needed). Uses Google's Docker Hub
+    # mirror by default: unlike registry-1.docker.io (whose blob CDN
+    # production.cloudfront.docker.com is blocked on some networks),
+    # mirror.gcr.io serves blobs from the same host.
+    echo "==> Falling back to registry layer extraction (intel/oneapi-basekit)"
     local repo="intel/oneapi-basekit" tag="latest"
+    local registry="${QR_OCI_REGISTRY:-mirror.gcr.io}"
     local tok manifest
-    tok=$(curl -fsS "https://auth.docker.io/token?service=registry.docker.io&scope=repository:${repo}:pull" \
-        | python3 -c "import json,sys;print(json.load(sys.stdin)['token'])")
+    get_token() {
+        if [ "$registry" = "mirror.gcr.io" ]; then
+            curl -fsS "https://mirror.gcr.io/v2/token?scope=repository:${repo}:pull&service=mirror.gcr.io" \
+                | python3 -c "import json,sys;print(json.load(sys.stdin)['token'])"
+        else
+            curl -fsS "https://auth.docker.io/token?service=registry.docker.io&scope=repository:${repo}:pull" \
+                | python3 -c "import json,sys;print(json.load(sys.stdin)['token'])"
+        fi
+    }
+    tok=$(get_token)
     manifest=$(curl -fsS -H "Authorization: Bearer $tok" \
         -H "Accept: application/vnd.docker.distribution.manifest.v2+json" \
-        "https://registry-1.docker.io/v2/${repo}/manifests/${tag}")
+        "https://${registry}/v2/${repo}/manifests/${tag}")
     # The oneAPI install is in the largest layer; extract only what icpx needs.
     local digest
     digest=$(printf '%s' "$manifest" | python3 -c "
@@ -52,7 +66,7 @@ print(max(m['layers'], key=lambda l: l['size'])['digest'])")
     $SUDO mkdir -p /opt
     for attempt in 1 2 3; do
         if curl -fsSL -H "Authorization: Bearer $tok" \
-            "https://registry-1.docker.io/v2/${repo}/blobs/${digest}" \
+            "https://${registry}/v2/${repo}/blobs/${digest}" \
             | gunzip \
             | $SUDO tar -x -C / \
                   opt/intel/oneapi/setvars.sh \
@@ -64,8 +78,7 @@ print(max(m['layers'], key=lambda l: l['size'])['digest'])")
         fi
         echo "attempt $attempt failed; retrying in $((attempt*10))s" >&2
         sleep $((attempt*10))
-        tok=$(curl -fsS "https://auth.docker.io/token?service=registry.docker.io&scope=repository:${repo}:pull" \
-            | python3 -c "import json,sys;print(json.load(sys.stdin)['token'])")
+        tok=$(get_token)
     done
     echo "layer extraction failed after 3 attempts" >&2
     return 1

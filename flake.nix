@@ -1,13 +1,17 @@
 {
   description = "qr_cpp_compiler - GCC vs Clang vs Intel oneAPI on an equity-vol quant pipeline";
 
-  inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-24.11";
+  # Tarball input (not github:) so restricted networks that block the GitHub
+  # API but allow channels.nixos.org/releases.nixos.org still resolve it.
+  inputs.nixpkgs.url = "https://channels.nixos.org/nixos-24.11/nixexprs.tar.xz";
 
   outputs = { self, nixpkgs }:
     let
       system = "x86_64-linux";
       pkgs = nixpkgs.legacyPackages.${system};
-      python = pkgs.python312.withPackages (ps: with ps; [ numpy nanobind ]);
+      # scipy is only used by the data generator (exact erf for ground-truth
+      # pricing), never by timed code.
+      python = pkgs.python312.withPackages (ps: with ps; [ numpy nanobind scipy ]);
     in
     {
       devShells.${system}.default = pkgs.mkShell {
