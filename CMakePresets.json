@@ -1,0 +1,55 @@
+{
+  "version": 6,
+  "configurePresets": [
+    {
+      "name": "base",
+      "hidden": true,
+      "generator": "Ninja",
+      "cacheVariables": { "CMAKE_BUILD_TYPE": "Release" }
+    },
+    {
+      "name": "gcc-strict",
+      "inherits": "base",
+      "binaryDir": "${sourceDir}/build-gcc-strict",
+      "cacheVariables": { "CMAKE_CXX_COMPILER": "g++", "QR_FAST_MATH": "OFF" }
+    },
+    {
+      "name": "gcc-fast",
+      "inherits": "base",
+      "binaryDir": "${sourceDir}/build-gcc-fast",
+      "cacheVariables": { "CMAKE_CXX_COMPILER": "g++", "QR_FAST_MATH": "ON" }
+    },
+    {
+      "name": "clang-strict",
+      "inherits": "base",
+      "binaryDir": "${sourceDir}/build-clang-strict",
+      "cacheVariables": { "CMAKE_CXX_COMPILER": "clang++", "QR_FAST_MATH": "OFF" }
+    },
+    {
+      "name": "clang-fast",
+      "inherits": "base",
+      "binaryDir": "${sourceDir}/build-clang-fast",
+      "cacheVariables": { "CMAKE_CXX_COMPILER": "clang++", "QR_FAST_MATH": "ON" }
+    },
+    {
+      "name": "icpx-strict",
+      "inherits": "base",
+      "binaryDir": "${sourceDir}/build-icpx-strict",
+      "cacheVariables": { "CMAKE_CXX_COMPILER": "icpx", "QR_FAST_MATH": "OFF" }
+    },
+    {
+      "name": "icpx-fast",
+      "inherits": "base",
+      "binaryDir": "${sourceDir}/build-icpx-fast",
+      "cacheVariables": { "CMAKE_CXX_COMPILER": "icpx", "QR_FAST_MATH": "ON" }
+    }
+  ],
+  "buildPresets": [
+    { "name": "gcc-strict", "configurePreset": "gcc-strict" },
+    { "name": "gcc-fast", "configurePreset": "gcc-fast" },
+    { "name": "clang-strict", "configurePreset": "clang-strict" },
+    { "name": "clang-fast", "configurePreset": "clang-fast" },
+    { "name": "icpx-strict", "configurePreset": "icpx-strict" },
+    { "name": "icpx-fast", "configurePreset": "icpx-fast" }
+  ]
+}
