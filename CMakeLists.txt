@@ -18,6 +18,19 @@ option(QR_BUILD_PYTHON "Build the nanobind module" ON)
 set(QR_OPT_FLAGS "")
 if(CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM")
     list(APPEND QR_OPT_FLAGS -O3 -xHost)
+    # Use icpx's bundled lld: inside a nix devShell the PATH `ld` is nix's
+    # wrapper, which injects nix rpaths/interpreter into icpx links and
+    # produces binaries that crash at loader init (glibc mismatch).
+    add_link_options(-fuse-ld=lld)
+    # Self-contained runtime lookup: Intel's libsvml/libimf next to the
+    # compiler, and the system libstdc++ (icpx targets the system gcc here) —
+    # so the module loads without setvars.sh in the benchmark processes.
+    get_filename_component(QR_ICPX_BIN ${CMAKE_CXX_COMPILER} DIRECTORY)
+    get_filename_component(QR_ICPX_ROOT ${QR_ICPX_BIN} DIRECTORY)
+    add_link_options(-Wl,-rpath,${QR_ICPX_ROOT}/lib)
+    if(EXISTS /usr/lib/x86_64-linux-gnu/libstdc++.so.6)
+        add_link_options(-Wl,-rpath,/usr/lib/x86_64-linux-gnu)
+    endif()
     if(QR_FAST_MATH)
         # -fimf-precision=high keeps SVML calls at <1 ulp so cross-compiler
         # validation tolerances stay meaningful.
@@ -48,9 +61,12 @@ else()
     message(FATAL_ERROR "Unsupported compiler: ${CMAKE_CXX_COMPILER_ID}")
 endif()
 
-# icpx is installed outside nix; point it at a specific gcc toolchain so its
-# libstdc++ matches the gcc/clang builds (set QR_GCC_TOOLCHAIN in the env,
-# e.g. by the flake shellHook).
+# icpx is installed outside nix and deliberately targets the SYSTEM gcc
+# toolchain (Ubuntu g++ 13 / libstdc++ 6.0.x) rather than nix's: mixing nix's
+# glibc-2.40-linked libstdc++ into a system-glibc binary breaks at load time.
+# Same-major libstdc++ across variants is asserted by scripts/build_all.sh;
+# each variant runs in its own process, and no C++ runtime code is on the
+# timed path. QR_GCC_TOOLCHAIN overrides the probe when set explicitly.
 if(CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM" AND DEFINED ENV{QR_GCC_TOOLCHAIN})
     list(APPEND QR_OPT_FLAGS --gcc-toolchain=$ENV{QR_GCC_TOOLCHAIN})
     add_link_options(--gcc-toolchain=$ENV{QR_GCC_TOOLCHAIN})

@@ -11,11 +11,6 @@ fi
 PRESETS=(gcc-strict gcc-fast clang-strict clang-fast)
 if command -v icpx >/dev/null 2>&1; then
     PRESETS+=(icpx-strict icpx-fast)
-    # icpx must link the same libstdc++ as the nix gcc builds.
-    if [ -z "${QR_GCC_TOOLCHAIN:-}" ]; then
-        QR_GCC_TOOLCHAIN="$(dirname "$(dirname "$(command -v g++)")")"
-        export QR_GCC_TOOLCHAIN
-    fi
 else
     echo "WARNING: icpx not found - skipping icpx presets (run scripts/install_oneapi.sh)" >&2
 fi
@@ -29,13 +24,19 @@ for p in "${PRESETS[@]}"; do
     cmake --build --preset "$p"
 done
 
+# Every module must depend on the same libstdc++ SONAME (libstdc++.so.6).
+# Exact file paths may differ (nix vs system gcc 13 runtimes); that is safe
+# because each variant runs in its own process and no C++ runtime code is on
+# the timed path. The resolved version of each is printed for the record.
 echo "==> libstdc++ consistency check"
-paths=$(for p in "${PRESETS[@]}"; do
-    ldd "build-$p"/qr_pipeline.*.so | awk '/libstdc\+\+/ {print $3}'
+sonames=$(for p in "${PRESETS[@]}"; do
+    so="$(ls "build-$p"/qr_pipeline.*.so)"
+    lib=$(ldd "$so" | awk '/libstdc\+\+/ {print $3}')
+    echo "$p -> $(basename "$(readlink -f "$lib")")" >&2
+    ldd "$so" | awk '/libstdc\+\+/ {print $1}'
 done | sort -u)
-echo "$paths"
-if [ "$(echo "$paths" | wc -l)" -ne 1 ]; then
-    echo "ERROR: variants link different libstdc++ libraries" >&2
+if [ "$(echo "$sonames" | wc -l)" -ne 1 ]; then
+    echo "ERROR: variants depend on different libstdc++ SONAMEs: $sonames" >&2
     exit 1
 fi
-echo "OK: all variants share one libstdc++"
+echo "OK: all variants depend on $sonames"

@@ -83,12 +83,13 @@ print(max(m['layers'], key=lambda l: l['size'])['digest'])")
     echo "==> Extracting compiler component into /opt/intel"
     $SUDO mkdir -p /opt
     $SUDO rm -rf /opt/intel   # drop any partial prior extraction
-    gunzip -c "$blob" | $SUDO tar -x -C / \
+    gunzip -c "$blob" | $SUDO tar -x -C / --wildcards \
         opt/intel/oneapi/setvars.sh \
         opt/intel/oneapi/common \
         opt/intel/oneapi/compiler \
         opt/intel/oneapi/tbb \
-        opt/intel/oneapi/umf
+        opt/intel/oneapi/umf \
+        'opt/intel/oneapi/2[0-9]*'   # unified-layout dir (hard-link targets)
     rm -f "$blob"
 }
 

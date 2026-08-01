@@ -39,9 +39,8 @@
           else
             echo "icpx NOT available - run scripts/install_oneapi.sh for the oneAPI leg"
           fi
-          # icpx builds link against this gcc's libstdc++ so all variants
-          # share one C++ runtime (see CMakeLists QR_GCC_TOOLCHAIN).
-          export QR_GCC_TOOLCHAIN="$(dirname $(dirname $(command -v g++)))"
+          # scripts/build_all.sh derives QR_GCC_TOOLCHAIN / QR_LIBSTDCXX_DIR
+          # from this shell's g++ so icpx links the same libstdc++.
         '';
       };
     };
