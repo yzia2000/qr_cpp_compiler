@@ -62,26 +62,34 @@ docker_layer_route() {
 import json,sys
 m=json.load(sys.stdin)
 print(max(m['layers'], key=lambda l: l['size'])['digest'])")
-    echo "==> Streaming layer $digest (~4.2 GB compressed) into /opt/intel"
-    $SUDO mkdir -p /opt
-    for attempt in 1 2 3; do
-        if curl -fsSL -H "Authorization: Bearer $tok" \
-            "https://${registry}/v2/${repo}/blobs/${digest}" \
-            | gunzip \
-            | $SUDO tar -x -C / \
-                  opt/intel/oneapi/setvars.sh \
-                  opt/intel/oneapi/common \
-                  opt/intel/oneapi/compiler \
-                  opt/intel/oneapi/tbb \
-                  opt/intel/oneapi/umf 2>/dev/null; then
-            return 0
+    echo "==> Downloading layer $digest (~4.2 GB compressed, resumable)"
+    local blob="${TMPDIR:-/tmp}/oneapi_layer.tar.gz"
+    for attempt in 1 2 3 4 5 6 7 8; do
+        if curl -fSL -C - --retry 5 --retry-delay 5 \
+            -H "Authorization: Bearer $tok" \
+            -o "$blob" \
+            "https://${registry}/v2/${repo}/blobs/${digest}"; then
+            break
         fi
-        echo "attempt $attempt failed; retrying in $((attempt*10))s" >&2
-        sleep $((attempt*10))
+        echo "download attempt $attempt interrupted; resuming in 10s" >&2
+        sleep 10
         tok=$(get_token)
+        [ "$attempt" = 8 ] && { echo "download failed" >&2; return 1; }
     done
-    echo "layer extraction failed after 3 attempts" >&2
-    return 1
+    echo "==> Verifying digest"
+    local got
+    got=$(sha256sum "$blob" | cut -d' ' -f1)
+    [ "sha256:$got" = "$digest" ] || { echo "digest mismatch: $got" >&2; return 1; }
+    echo "==> Extracting compiler component into /opt/intel"
+    $SUDO mkdir -p /opt
+    $SUDO rm -rf /opt/intel   # drop any partial prior extraction
+    gunzip -c "$blob" | $SUDO tar -x -C / \
+        opt/intel/oneapi/setvars.sh \
+        opt/intel/oneapi/common \
+        opt/intel/oneapi/compiler \
+        opt/intel/oneapi/tbb \
+        opt/intel/oneapi/umf
+    rm -f "$blob"
 }
 
 if ! apt_route; then
