@@ -2,7 +2,6 @@ build-*/
 data/
 results/*.json
 results/*.npz
-results/*.md
 .venv/
 __pycache__/
 *.pyc
