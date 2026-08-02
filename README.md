@@ -14,8 +14,9 @@ math-heavy equity-volatility quant research pipeline.
 - The kernels are saturated with `erf`/`exp`/`log`/`sqrt` — exactly where compiler
   vector-math runtimes diverge: icpx auto-vectorizes these via SVML; GCC/Clang
   can only reach glibc's libmvec (no vector `erf`) under `-ffast-math`.
-- Six build variants: {gcc, clang, icpx} x {strict IEEE, fast-math}, identical
-  source, single-threaded by design (this measures codegen, not threading).
+- Nine build variants: {gcc, clang, icpx} x {strict IEEE, fast-math, fast-math
+  forced to 512-bit vectors}, identical source, single-threaded by design
+  (this measures codegen, not threading).
 - Every variant is numerically validated against a strict reference and against
   the generator's ground-truth SVI surfaces before results count.
 
@@ -72,45 +73,65 @@ math-heavy equity-volatility quant research pipeline.
 <!-- RESULTS:BEGIN -->
 | variant | compiler | IV med (ms) | IV Mq/s | SVI med (ms) | greeks med (ms) | total (ms) | vs gcc-strict |
 |---|---|---|---|---|---|---|---|
-| gcc-strict | GNU 13.3.0 | 16316 | 1.83 | 10928 | 2983 | 30226 | 1.00x |
-| gcc-fast | GNU 13.3.0 | 11842 | 2.52 | 10921 | 2837 | 25600 | 1.18x |
-| clang-strict | Clang 18.1.8 | 17061 | 1.75 | 6559 | 3021 | 26640 | 1.13x |
-| clang-fast | Clang 18.1.8 | 15574 | 1.92 | 6278 | 2843 | 24695 | 1.22x |
-| icpx-strict | IntelLLVM 2025.3.3 | 15830 | 1.89 | 5107 | 2982 | 23919 | 1.26x |
-| icpx-fast | IntelLLVM 2025.3.3 | 12672 | 2.36 | 2802 | 850 | 16323 | 1.85x |
+| gcc-strict | GNU 13.3.0 | 13087 | 2.28 | 8879 | 2571 | 24536 | 1.00x |
+| gcc-fast | GNU 13.3.0 | 9719 | 3.07 | 9494 | 2341 | 21554 | 1.14x |
+| gcc-fast-zmm | GNU 13.3.0 | 9813 | 3.04 | 9094 | 2499 | 21406 | 1.15x |
+| clang-strict | Clang 18.1.8 | 13971 | 2.14 | 5852 | 2652 | 22475 | 1.09x |
+| clang-fast | Clang 18.1.8 | 12877 | 2.32 | 5411 | 2454 | 20742 | 1.18x |
+| clang-fast-zmm | Clang 18.1.8 | 12501 | 2.39 | 5461 | 2491 | 20453 | 1.20x |
+| icpx-strict | IntelLLVM 2025.3.3 | 13067 | 2.29 | 4333 | 2520 | 19920 | 1.23x |
+| icpx-fast | IntelLLVM 2025.3.3 | 10545 | 2.83 | 2385 | 770 | 13700 | 1.79x |
+| icpx-fast-zmm | IntelLLVM 2025.3.3 | 12056 | 2.48 | 3039 | 633 | 15728 | 1.56x |
 
 - 29,873,000 quotes from `quotes_1g.pcap`; per-stage median of timed reps, single-threaded; higher `vs gcc-strict` = faster overall.
 <!-- RESULTS:END -->
 
 ## Conclusion
 
-- **The oneAPI theory holds**: icpx-fast finishes the pipeline **1.85x faster than
-  gcc-strict** and **1.51x faster than the best non-Intel variant** (clang-fast) —
+- **The oneAPI theory holds**: icpx-fast finishes the pipeline **1.79x faster than
+  gcc-strict** and **1.44x faster than the best non-Intel variant** (clang-fast-zmm) —
   the single biggest lever in this workload class.
 - The advantage lands exactly where predicted: SVML. The icpx-fast module
   imports `__svml_erf4` / `__svml_exp4` / `__svml_log4` (vectorized
   transcendentals); the gcc/clang modules contain **no** vector-math symbols, and
   clang explicitly reports the Newton loop "not vectorized" — glibc's libmvec
   has no vector `erf`, so any `norm_cdf`-bearing loop stays scalar for gcc/clang.
-- Stage detail: SVI fit 3.9x vs gcc (2.8s vs 10.9s) and greeks 3.5x (0.85s vs
-  2.98s) for icpx-fast — the erf- and FMA-dense sweeps vectorize fully.
-- Nuance 1: on the Newton IV stage alone, gcc-fast (2.52 Mq/s) slightly beats
-  icpx-fast (2.36 Mq/s) — gcc's scalar fast-math codegen is excellent when
+- Stage detail: SVI fit 3.7x vs gcc-strict (2.4s vs 8.9s) and greeks 3.3x
+  (0.77s vs 2.57s) for icpx-fast — the erf- and FMA-dense sweeps vectorize fully.
+- **Forcing 512-bit vectors (zmm) did not pay off — it made icpx *slower*.**
+  icpx-fast-zmm imports the wider `__svml_erf8/exp8/log8` and its greeks/SVI
+  objects carry real zmm instruction counts (136/219, vs 0 at default width),
+  yet its total time (15.7s) is **14.8% worse** than icpx-fast (13.7s): IV
+  regressed 10.5s→12.1s and SVI 2.4s→3.0s, while only greeks improved
+  (0.77s→0.63s). This is the classic AVX-512 license-downclocking trade —
+  even on Emerald Rapids, where the frequency penalty is supposed to be mild,
+  8-wide execution still cost more in throttling/transition overhead than it
+  gained in width for this workload. Intel's `-qopt-zmm-usage=low` default is
+  the right call here; the compilers' 256-bit conservatism was vindicated, not
+  overcome.
+- The zmm flag was a no-op for gcc/clang as predicted: `-mprefer-vector-width=512`
+  only widens loops that already vectorize, and neither compiler vectorizes
+  the erf-bearing loops in the first place — their zmm variants move within
+  run-to-run noise (gcc: 21.55s→21.41s; clang: 20.74s→20.45s).
+- Nuance 1: on the Newton IV stage alone, gcc-fast (3.07 Mq/s) beats
+  icpx-fast (2.83 Mq/s) — gcc's scalar fast-math codegen is excellent when
   data-dependent iteration state limits vector efficiency. SVML is not a
-  universal win; it wins where loops are cleanly vectorizable.
-- Nuance 2: under strict IEEE semantics the field compresses to 1.00-1.26x
+  universal win; it wins where loops are cleanly vectorizable, and loses when
+  forced wider than the workload wants (see zmm above).
+- Nuance 2: under strict IEEE semantics the field compresses to 1.00-1.23x
   (icpx still fastest via value-safe SVI vectorization). Most of Intel's edge
   requires opting into `-fp-model=fast`.
 - Nuance 3: clang beats gcc clearly on the branch-and-Cholesky-heavy LM fitter
-  (6.6s vs 10.9s strict) — compiler strength is stage-dependent.
-- The speed came at no accuracy cost here: all six builds agree to **2e-14 vol
+  (5.9s vs 8.9s strict) — compiler strength is stage-dependent.
+- The speed came at no accuracy cost here: all nine builds agree to **2e-14 vol
   points** with zero convergence flips (`results/validation.md`), helped by
   `-fimf-precision=high` and the branchless fixed-iteration Newton design.
 - Practical read for a vol desk: if you run Intel hardware and can qualify
-  relaxed-FP numerics, icpx + SVML is worth ~35-50% wall-clock on
-  transcendental-bound pipelines; if you must stay strict-IEEE or run the
-  fitter-style branchy code, the three compilers are much closer than the
-  marketing suggests.
+  relaxed-FP numerics, icpx + SVML at its **default** vector width is worth
+  ~30-45% wall-clock on transcendental-bound pipelines — don't reach for
+  `-qopt-zmm-usage=high` expecting a free win, it cost this pipeline ~15%; if
+  you must stay strict-IEEE or run the fitter-style branchy code, the three
+  compilers are much closer than the marketing suggests.
 
 ## Appendix: vectorization evidence
 
