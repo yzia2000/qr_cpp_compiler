@@ -1,0 +1,672 @@
+{
+ "libzmq-c": {
+  "basic_filtering": {
+   "status": "PASS",
+   "detail": "",
+   "server_alive": true,
+   "seconds": 0.54
+  },
+  "late_joining_publisher": {
+   "status": "PASS",
+   "detail": "",
+   "server_alive": true,
+   "seconds": 0.54
+  },
+  "shared_topic_one_unsubscribes": {
+   "status": "PASS",
+   "detail": "",
+   "server_alive": true,
+   "seconds": 1.86
+  },
+  "shared_topic_one_disconnects": {
+   "status": "PASS",
+   "detail": "",
+   "server_alive": true,
+   "seconds": 1.76
+  },
+  "upstream_cancel_on_unsubscribe": {
+   "status": "PASS",
+   "detail": "",
+   "server_alive": true,
+   "seconds": 0.1
+  },
+  "upstream_cancel_on_subscriber_disconnect": {
+   "status": "PASS",
+   "detail": "",
+   "server_alive": true,
+   "seconds": 0.1
+  },
+  "subscription_leak_under_churn": {
+   "status": "PASS",
+   "detail": "",
+   "server_alive": true,
+   "seconds": 4.54
+  },
+  "upstream_subscribe_dedup": {
+   "status": "PASS",
+   "detail": "",
+   "server_alive": true,
+   "seconds": 1.53
+  },
+  "multipart_integrity": {
+   "status": "PASS",
+   "detail": "",
+   "server_alive": true,
+   "seconds": 2.06
+  },
+  "xsub_client_sends_data_upstream": {
+   "status": "PASS",
+   "detail": "",
+   "server_alive": true,
+   "seconds": 1.16
+  },
+  "xsub_client_sends_empty_message": {
+   "status": "PASS",
+   "detail": "",
+   "server_alive": true,
+   "seconds": 0.86
+  },
+  "xsub_client_sends_multipart_subscribe": {
+   "status": "PASS",
+   "detail": "",
+   "server_alive": true,
+   "seconds": 0.86
+  },
+  "overlapping_prefixes": {
+   "status": "PASS",
+   "detail": "",
+   "server_alive": true,
+   "seconds": 1.66
+  },
+  "same_socket_double_subscribe": {
+   "status": "PASS",
+   "detail": "",
+   "server_alive": true,
+   "seconds": 1.64
+  },
+  "subscriber_with_65_topics": {
+   "idle_server_cpu_pct": 0,
+   "status": "PASS",
+   "detail": "",
+   "server_alive": true,
+   "seconds": 2.12
+  },
+  "subscription_storm_20k": {
+   "storm_upstream_s": 0.24,
+   "storm_forwarded": 20000,
+   "status": "PASS",
+   "detail": "",
+   "server_alive": true,
+   "seconds": 0.54
+  },
+  "publisher_restart": {
+   "status": "PASS",
+   "detail": "",
+   "server_alive": true,
+   "seconds": 0.38
+  },
+  "burst_of_large_messages": {
+   "delivered": 50,
+   "status": "PASS",
+   "detail": "",
+   "server_alive": true,
+   "seconds": 3.06
+  },
+  "server_restart_recovery": {
+   "recovery_s": 0.21,
+   "status": "PASS",
+   "detail": "",
+   "server_alive": true,
+   "seconds": 0.26
+  },
+  "ten_subscribers_ten_topics_connect_together": {
+   "status": "PASS",
+   "detail": "",
+   "server_alive": true,
+   "seconds": 0.7
+  },
+  "restart_with_ten_subscribers_ten_topics": {
+   "recovery_s": 0.35,
+   "status": "PASS",
+   "detail": "",
+   "server_alive": true,
+   "seconds": 0.75
+  }
+ },
+ "omq-tokio": {
+  "basic_filtering": {
+   "status": "PASS",
+   "detail": "",
+   "server_alive": true,
+   "seconds": 0.54
+  },
+  "late_joining_publisher": {
+   "status": "PASS",
+   "detail": "",
+   "server_alive": true,
+   "seconds": 0.54
+  },
+  "shared_topic_one_unsubscribes": {
+   "status": "FAIL",
+   "detail": "remaining subscriber received 0/10 messages after the other unsubscribed",
+   "server_alive": true,
+   "seconds": 1.86
+  },
+  "shared_topic_one_disconnects": {
+   "status": "PASS",
+   "detail": "",
+   "server_alive": true,
+   "seconds": 1.76
+  },
+  "upstream_cancel_on_unsubscribe": {
+   "status": "PASS",
+   "detail": "",
+   "server_alive": true,
+   "seconds": 0.1
+  },
+  "upstream_cancel_on_subscriber_disconnect": {
+   "status": "FAIL",
+   "detail": "subscriber disconnected but its subscription was never cancelled upstream (leak)",
+   "server_alive": true,
+   "seconds": 3.05
+  },
+  "subscription_leak_under_churn": {
+   "status": "FAIL",
+   "detail": "50/50 subscriptions of disconnected subscribers still active upstream",
+   "server_alive": true,
+   "seconds": 4.53
+  },
+  "upstream_subscribe_dedup": {
+   "status": "FAIL",
+   "detail": "5 upstream SUBSCRIBE messages for one topic with 5 subscribers (libzmq: 1)",
+   "server_alive": true,
+   "seconds": 1.53
+  },
+  "multipart_integrity": {
+   "status": "FAIL",
+   "detail": "got 15 msgs, 15 intact, order=[0, 1, 3, 5, 7]...",
+   "server_alive": true,
+   "seconds": 2.06
+  },
+  "xsub_client_sends_data_upstream": {
+   "status": "FAIL",
+   "detail": "proxy died or stopped forwarding after one upstream data message (alive=False, forwarding=False); server log: 'READY omq-tokio 0.24.0 io_threads=1 run_on=main hwm=None slot_cap=None\\nPROXY EXIT: Err(Protocol(\"XSUB raw command must start with 0x01 or 0x00\"))\\n'",
+   "server_alive": false,
+   "seconds": 3.16
+  },
+  "xsub_client_sends_empty_message": {
+   "status": "FAIL",
+   "detail": "proxy died/stalled after an empty upstream message; log: 'READY omq-tokio 0.24.0 io_threads=1 run_on=main hwm=None slot_cap=None\\nPROXY EXIT: Err(Protocol(\"XSUB raw command cannot be empty\"))\\n'",
+   "server_alive": false,
+   "seconds": 0.84
+  },
+  "xsub_client_sends_multipart_subscribe": {
+   "status": "FAIL",
+   "detail": "proxy died/stalled after a multipart upstream message; log: 'READY omq-tokio 0.24.0 io_threads=1 run_on=main hwm=None slot_cap=None\\nPROXY EXIT: Err(Protocol(\"XSUB raw command must be a single frame\"))\\n'",
+   "server_alive": false,
+   "seconds": 0.84
+  },
+  "overlapping_prefixes": {
+   "status": "PASS",
+   "detail": "",
+   "server_alive": true,
+   "seconds": 1.66
+  },
+  "same_socket_double_subscribe": {
+   "status": "PASS",
+   "detail": "",
+   "server_alive": true,
+   "seconds": 1.64
+  },
+  "subscriber_with_65_topics": {
+   "idle_server_cpu_pct": 99,
+   "status": "FAIL",
+   "detail": "server wedged: existing subscriber receives=False, new subscriber can join=False, 65th topic delivered=False, idle server CPU=99%",
+   "server_alive": true,
+   "seconds": 11.08
+  },
+  "subscription_storm_20k": {
+   "storm_upstream_s": 60.16,
+   "storm_forwarded": 0,
+   "status": "FAIL",
+   "detail": "only 0/20000 subscriptions reached the publisher within 60 s",
+   "server_alive": true,
+   "seconds": 60.46
+  },
+  "publisher_restart": {
+   "status": "PASS",
+   "detail": "",
+   "server_alive": true,
+   "seconds": 0.38
+  },
+  "burst_of_large_messages": {
+   "delivered": 13,
+   "status": "FAIL",
+   "detail": "delivered 13/50 intact 512 KiB messages from a single burst",
+   "server_alive": true,
+   "seconds": 3.06
+  },
+  "server_restart_recovery": {
+   "recovery_s": 0.17,
+   "status": "PASS",
+   "detail": "",
+   "server_alive": true,
+   "seconds": 0.22
+  },
+  "ten_subscribers_ten_topics_connect_together": {
+   "status": "FAIL",
+   "detail": "10/10 subscribers never received data",
+   "server_alive": true,
+   "seconds": 30.62
+  },
+  "restart_with_ten_subscribers_ten_topics": {
+   "recovery_s": 0.33,
+   "status": "PASS",
+   "detail": "",
+   "server_alive": true,
+   "seconds": 0.74
+  }
+ },
+ "omq-tokio-io2": {
+  "basic_filtering": {
+   "status": "PASS",
+   "detail": "",
+   "server_alive": true,
+   "seconds": 0.54
+  },
+  "late_joining_publisher": {
+   "status": "PASS",
+   "detail": "",
+   "server_alive": true,
+   "seconds": 0.54
+  },
+  "shared_topic_one_unsubscribes": {
+   "status": "FAIL",
+   "detail": "remaining subscriber received 0/10 messages after the other unsubscribed",
+   "server_alive": true,
+   "seconds": 1.86
+  },
+  "shared_topic_one_disconnects": {
+   "status": "PASS",
+   "detail": "",
+   "server_alive": true,
+   "seconds": 1.76
+  },
+  "upstream_cancel_on_unsubscribe": {
+   "status": "PASS",
+   "detail": "",
+   "server_alive": true,
+   "seconds": 0.1
+  },
+  "upstream_cancel_on_subscriber_disconnect": {
+   "status": "FAIL",
+   "detail": "subscriber disconnected but its subscription was never cancelled upstream (leak)",
+   "server_alive": true,
+   "seconds": 3.05
+  },
+  "subscription_leak_under_churn": {
+   "status": "FAIL",
+   "detail": "50/50 subscriptions of disconnected subscribers still active upstream",
+   "server_alive": true,
+   "seconds": 4.54
+  },
+  "upstream_subscribe_dedup": {
+   "status": "FAIL",
+   "detail": "5 upstream SUBSCRIBE messages for one topic with 5 subscribers (libzmq: 1)",
+   "server_alive": true,
+   "seconds": 1.53
+  },
+  "multipart_integrity": {
+   "status": "FAIL",
+   "detail": "got 11 msgs, 11 intact, order=[0, 2, 4, 6, 8]...",
+   "server_alive": true,
+   "seconds": 2.05
+  },
+  "xsub_client_sends_data_upstream": {
+   "status": "FAIL",
+   "detail": "proxy died or stopped forwarding after one upstream data message (alive=False, forwarding=False); server log: 'READY omq-tokio 0.24.0 io_threads=2 run_on=main hwm=None slot_cap=None\\nPROXY EXIT: Err(Protocol(\"XSUB raw command must start with 0x01 or 0x00\"))\\n'",
+   "server_alive": false,
+   "seconds": 3.14
+  },
+  "xsub_client_sends_empty_message": {
+   "status": "FAIL",
+   "detail": "proxy died/stalled after an empty upstream message; log: 'READY omq-tokio 0.24.0 io_threads=2 run_on=main hwm=None slot_cap=None\\nPROXY EXIT: Err(Protocol(\"XSUB raw command cannot be empty\"))\\n'",
+   "server_alive": false,
+   "seconds": 0.84
+  },
+  "xsub_client_sends_multipart_subscribe": {
+   "status": "FAIL",
+   "detail": "proxy died/stalled after a multipart upstream message; log: 'READY omq-tokio 0.24.0 io_threads=2 run_on=main hwm=None slot_cap=None\\nPROXY EXIT: Err(Protocol(\"XSUB raw command must be a single frame\"))\\n'",
+   "server_alive": false,
+   "seconds": 0.84
+  },
+  "overlapping_prefixes": {
+   "status": "PASS",
+   "detail": "",
+   "server_alive": true,
+   "seconds": 1.66
+  },
+  "same_socket_double_subscribe": {
+   "status": "PASS",
+   "detail": "",
+   "server_alive": true,
+   "seconds": 1.64
+  },
+  "subscriber_with_65_topics": {
+   "idle_server_cpu_pct": 0,
+   "status": "PASS",
+   "detail": "",
+   "server_alive": true,
+   "seconds": 2.12
+  },
+  "subscription_storm_20k": {
+   "storm_upstream_s": 1.24,
+   "storm_forwarded": 20000,
+   "status": "PASS",
+   "detail": "",
+   "server_alive": true,
+   "seconds": 1.54
+  },
+  "publisher_restart": {
+   "status": "PASS",
+   "detail": "",
+   "server_alive": true,
+   "seconds": 0.38
+  },
+  "burst_of_large_messages": {
+   "delivered": 13,
+   "status": "FAIL",
+   "detail": "delivered 13/50 intact 512 KiB messages from a single burst",
+   "server_alive": true,
+   "seconds": 3.06
+  },
+  "server_restart_recovery": {
+   "recovery_s": 0.17,
+   "status": "PASS",
+   "detail": "",
+   "server_alive": true,
+   "seconds": 0.22
+  },
+  "ten_subscribers_ten_topics_connect_together": {
+   "status": "PASS",
+   "detail": "",
+   "server_alive": true,
+   "seconds": 0.7
+  },
+  "restart_with_ten_subscribers_ten_topics": {
+   "recovery_s": 0.49,
+   "status": "PASS",
+   "detail": "",
+   "server_alive": true,
+   "seconds": 0.89
+  }
+ },
+ "omq-hardened": {
+  "basic_filtering": {
+   "status": "PASS",
+   "detail": "",
+   "server_alive": true,
+   "seconds": 0.54
+  },
+  "late_joining_publisher": {
+   "status": "PASS",
+   "detail": "",
+   "server_alive": true,
+   "seconds": 0.54
+  },
+  "shared_topic_one_unsubscribes": {
+   "status": "PASS",
+   "detail": "",
+   "server_alive": true,
+   "seconds": 1.86
+  },
+  "shared_topic_one_disconnects": {
+   "status": "PASS",
+   "detail": "",
+   "server_alive": true,
+   "seconds": 1.76
+  },
+  "upstream_cancel_on_unsubscribe": {
+   "status": "FAIL",
+   "detail": "subscribe never reached publisher: [b'\\x01']",
+   "server_alive": true,
+   "seconds": 3.0
+  },
+  "upstream_cancel_on_subscriber_disconnect": {
+   "status": "FAIL",
+   "detail": "subscribe never reached publisher: [b'\\x01']",
+   "server_alive": true,
+   "seconds": 3.0
+  },
+  "subscription_leak_under_churn": {
+   "status": "FAIL",
+   "detail": "1/50 subscriptions of disconnected subscribers still active upstream",
+   "server_alive": true,
+   "seconds": 103.04
+  },
+  "upstream_subscribe_dedup": {
+   "status": "FAIL",
+   "detail": "0 upstream SUBSCRIBE messages for one topic with 5 subscribers (libzmq: 1)",
+   "server_alive": true,
+   "seconds": 1.53
+  },
+  "multipart_integrity": {
+   "status": "PASS",
+   "detail": "",
+   "server_alive": true,
+   "seconds": 2.06
+  },
+  "xsub_client_sends_data_upstream": {
+   "status": "FAIL",
+   "detail": "upstream data message was not forwarded to publishers (libzmq forwards it)",
+   "server_alive": true,
+   "seconds": 1.16
+  },
+  "xsub_client_sends_empty_message": {
+   "status": "PASS",
+   "detail": "",
+   "server_alive": true,
+   "seconds": 0.86
+  },
+  "xsub_client_sends_multipart_subscribe": {
+   "status": "PASS",
+   "detail": "",
+   "server_alive": true,
+   "seconds": 0.86
+  },
+  "overlapping_prefixes": {
+   "status": "PASS",
+   "detail": "",
+   "server_alive": true,
+   "seconds": 1.66
+  },
+  "same_socket_double_subscribe": {
+   "status": "PASS",
+   "detail": "",
+   "server_alive": true,
+   "seconds": 1.64
+  },
+  "subscriber_with_65_topics": {
+   "idle_server_cpu_pct": 0,
+   "status": "PASS",
+   "detail": "",
+   "server_alive": true,
+   "seconds": 2.12
+  },
+  "subscription_storm_20k": {
+   "storm_upstream_s": 60.09,
+   "storm_forwarded": 1,
+   "status": "FAIL",
+   "detail": "only 1/20000 subscriptions reached the publisher within 60 s",
+   "server_alive": true,
+   "seconds": 60.39
+  },
+  "publisher_restart": {
+   "status": "PASS",
+   "detail": "",
+   "server_alive": true,
+   "seconds": 0.38
+  },
+  "burst_of_large_messages": {
+   "delivered": 50,
+   "status": "PASS",
+   "detail": "",
+   "server_alive": true,
+   "seconds": 3.07
+  },
+  "server_restart_recovery": {
+   "recovery_s": 0.19,
+   "status": "PASS",
+   "detail": "",
+   "server_alive": true,
+   "seconds": 0.24
+  },
+  "ten_subscribers_ten_topics_connect_together": {
+   "status": "PASS",
+   "detail": "",
+   "server_alive": true,
+   "seconds": 0.7
+  },
+  "restart_with_ten_subscribers_ten_topics": {
+   "recovery_s": 0.47,
+   "status": "PASS",
+   "detail": "",
+   "server_alive": true,
+   "seconds": 0.88
+  }
+ },
+ "zeromq": {
+  "basic_filtering": {
+   "status": "PASS",
+   "detail": "",
+   "server_alive": true,
+   "seconds": 0.54
+  },
+  "late_joining_publisher": {
+   "status": "PASS",
+   "detail": "",
+   "server_alive": true,
+   "seconds": 0.54
+  },
+  "shared_topic_one_unsubscribes": {
+   "status": "FAIL",
+   "detail": "remaining subscriber received 0/10 messages after the other unsubscribed",
+   "server_alive": true,
+   "seconds": 1.86
+  },
+  "shared_topic_one_disconnects": {
+   "status": "PASS",
+   "detail": "",
+   "server_alive": true,
+   "seconds": 1.76
+  },
+  "upstream_cancel_on_unsubscribe": {
+   "status": "PASS",
+   "detail": "",
+   "server_alive": true,
+   "seconds": 0.1
+  },
+  "upstream_cancel_on_subscriber_disconnect": {
+   "status": "FAIL",
+   "detail": "subscriber disconnected but its subscription was never cancelled upstream (leak)",
+   "server_alive": true,
+   "seconds": 3.06
+  },
+  "subscription_leak_under_churn": {
+   "status": "FAIL",
+   "detail": "50/50 subscriptions of disconnected subscribers still active upstream",
+   "server_alive": true,
+   "seconds": 4.53
+  },
+  "upstream_subscribe_dedup": {
+   "status": "FAIL",
+   "detail": "5 upstream SUBSCRIBE messages for one topic with 5 subscribers (libzmq: 1)",
+   "server_alive": true,
+   "seconds": 1.53
+  },
+  "multipart_integrity": {
+   "status": "FAIL",
+   "detail": "got 3 msgs, 3 intact, order=[0, 1, 2]...",
+   "server_alive": true,
+   "seconds": 2.05
+  },
+  "xsub_client_sends_data_upstream": {
+   "status": "PASS",
+   "detail": "",
+   "server_alive": true,
+   "seconds": 1.16
+  },
+  "xsub_client_sends_empty_message": {
+   "status": "PASS",
+   "detail": "",
+   "server_alive": true,
+   "seconds": 0.86
+  },
+  "xsub_client_sends_multipart_subscribe": {
+   "status": "PASS",
+   "detail": "",
+   "server_alive": true,
+   "seconds": 0.86
+  },
+  "overlapping_prefixes": {
+   "status": "PASS",
+   "detail": "",
+   "server_alive": true,
+   "seconds": 1.66
+  },
+  "same_socket_double_subscribe": {
+   "status": "PASS",
+   "detail": "",
+   "server_alive": true,
+   "seconds": 1.64
+  },
+  "subscriber_with_65_topics": {
+   "idle_server_cpu_pct": 0,
+   "status": "PASS",
+   "detail": "",
+   "server_alive": true,
+   "seconds": 2.12
+  },
+  "subscription_storm_20k": {
+   "storm_upstream_s": 0.29,
+   "storm_forwarded": 20000,
+   "status": "PASS",
+   "detail": "",
+   "server_alive": true,
+   "seconds": 0.59
+  },
+  "publisher_restart": {
+   "status": "PASS",
+   "detail": "",
+   "server_alive": true,
+   "seconds": 0.38
+  },
+  "burst_of_large_messages": {
+   "delivered": 2,
+   "status": "FAIL",
+   "detail": "delivered 2/50 intact 512 KiB messages from a single burst",
+   "server_alive": true,
+   "seconds": 3.08
+  },
+  "server_restart_recovery": {
+   "recovery_s": 0.14,
+   "status": "PASS",
+   "detail": "",
+   "server_alive": true,
+   "seconds": 0.19
+  },
+  "ten_subscribers_ten_topics_connect_together": {
+   "status": "PASS",
+   "detail": "",
+   "server_alive": true,
+   "seconds": 0.7
+  },
+  "restart_with_ten_subscribers_ten_topics": {
+   "recovery_s": 0.49,
+   "status": "PASS",
+   "detail": "",
+   "server_alive": true,
+   "seconds": 0.9
+  }
+ }
+}

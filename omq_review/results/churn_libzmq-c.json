@@ -1,0 +1,56 @@
+{
+ "server": "libzmq-c",
+ "size": 262144,
+ "window": 4,
+ "duration": 20.0,
+ "churn": {
+  "subs_churned": 105,
+  "pubs_churned": 31,
+  "churn_msgs": 20774
+ },
+ "server_alive": true,
+ "server_log": "READY c-api zmq_version=4.3.5 io_threads=1 hwm=-1\n",
+ "rss_first_third_mb": 34.9,
+ "rss_last_third_mb": 133.9,
+ "rss_peak_mb": 133.9,
+ "server_cpu_pct": 80.0,
+ "bench": {
+  "label": "libzmq-c",
+  "mode": "window",
+  "size": 262144,
+  "multipart": false,
+  "window": 4,
+  "rate": 100.0,
+  "subs": 1,
+  "slow_subs": 0,
+  "probe_s": 0.02,
+  "subscribed": true,
+  "measure_s": 20.0,
+  "sent": 101552,
+  "stalls": 0,
+  "send_rate": 5077.6,
+  "client_cpu_s": 30.81,
+  "subs_detail": [
+   {
+    "id": 0,
+    "slow": false,
+    "received": 101552,
+    "lost": 0,
+    "loss_pct": 0.0,
+    "dup": 0,
+    "reorder": 0,
+    "corrupt": 0,
+    "msgs_s": 5077.4,
+    "MB_s": 1331.0,
+    "lat_us": {
+     "p50": 555,
+     "p90": 1122,
+     "p99": 2487,
+     "p999": 5003,
+     "max": 34772
+    },
+    "first_error": ""
+   }
+  ]
+ }
+}

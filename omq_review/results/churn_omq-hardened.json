@@ -1,0 +1,56 @@
+{
+ "server": "omq-hardened",
+ "size": 262144,
+ "window": 4,
+ "duration": 20.0,
+ "churn": {
+  "subs_churned": 98,
+  "pubs_churned": 31,
+  "churn_msgs": 13584
+ },
+ "server_alive": true,
+ "server_log": "READY omq-tokio 0.24.0 hardened io_threads=2 slot_cap=67108864 max_msg=16777216\n",
+ "rss_first_third_mb": 93.7,
+ "rss_last_third_mb": 135.9,
+ "rss_peak_mb": 140.7,
+ "server_cpu_pct": 85.5,
+ "bench": {
+  "label": "omq-hardened",
+  "mode": "window",
+  "size": 262144,
+  "multipart": false,
+  "window": 4,
+  "rate": 100.0,
+  "subs": 1,
+  "slow_subs": 0,
+  "probe_s": 0.02,
+  "subscribed": true,
+  "measure_s": 20.0,
+  "sent": 109791,
+  "stalls": 0,
+  "send_rate": 5489.5,
+  "client_cpu_s": 29.13,
+  "subs_detail": [
+   {
+    "id": 0,
+    "slow": false,
+    "received": 109791,
+    "lost": 0,
+    "loss_pct": 0.0,
+    "dup": 0,
+    "reorder": 0,
+    "corrupt": 0,
+    "msgs_s": 5489.8,
+    "MB_s": 1439.1,
+    "lat_us": {
+     "p50": 494,
+     "p90": 979,
+     "p99": 2330,
+     "p999": 4266,
+     "max": 17221
+    },
+    "first_error": ""
+   }
+  ]
+ }
+}

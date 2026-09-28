@@ -1,0 +1,10 @@
+# Build artifacts live outside the repo (CARGO_TARGET_DIR); ignore any local ones.
+target/
+*.o
+xbench
+xproxy_libzmq
+xproxy_omqc
+/results/*.tmp
+
+__pycache__/
+*.pyc

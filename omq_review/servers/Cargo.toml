@@ -1,0 +1,34 @@
+[package]
+name = "xproxy-servers"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "XSUB/XPUB forwarding servers used by the omq.rs production review"
+
+# Pinned to the versions under review (crates.io releases, 2026-09-27).
+[dependencies]
+omq-tokio = "=0.24.0"
+zmq = "=0.10.0"          # rust-zmq (bundles libzmq 4.3.4 via zmq-sys/zeromq-src)
+zmq-sys = "=0.12.0"
+zeromq = { version = "=0.6.0", default-features = false, features = ["tokio-runtime", "all-transport"] }
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "time", "signal"] }
+bytes = "1"
+
+[[bin]]
+name = "omq_proxy"
+path = "src/bin/omq_proxy.rs"
+
+[[bin]]
+name = "omq_proxy_hardened"
+path = "src/bin/omq_proxy_hardened.rs"
+
+[[bin]]
+name = "libzmq_proxy"
+path = "src/bin/libzmq_proxy.rs"
+
+[[bin]]
+name = "zeromq_proxy"
+path = "src/bin/zeromq_proxy.rs"
+
+[profile.release]
+debug = "line-tables-only"
