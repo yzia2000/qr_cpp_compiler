@@ -140,13 +140,47 @@ Which io_uring opcodes a server really submits (e.g. whether `SENDMSG_ZC` is use
 kernel reports it copied anyway) comes from the `io_uring:io_uring_submit_req` /
 `io_uring_complete` tracepoints (`scripts/uring_trace.sh`, needs tracefs and root).
 
+## NNG 1.12.4 (nanomsg-next-generation)
+
+NNG speaks the SP protocol, not ZMTP, so it gets its own broker and a build of the same client
+with the SP transport compiled in (`-DXBENCH_NNG`: identical payload, verification and output).
+
+```sh
+git clone https://github.com/nanomsg/nng && cd nng && git checkout v1.12.4
+cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=ON \
+  -DNNG_TESTS=OFF -DNNG_TOOLS=OFF -DNNG_ENABLE_TLS=OFF -DCMAKE_INSTALL_PREFIX=$HOME/nng-install-1.12.4
+ninja -C build install
+N=$HOME/nng-install-1.12.4
+gcc -O2 -I$N/include -o nng_proxy omq_review/c_proxy/nng_proxy.c -L$N/lib -lnng -Wl,-rpath,$N/lib -lpthread
+g++ -O2 -march=native -std=c++17 -DXBENCH_NNG -I$N/include -o xbench_nng omq_review/client/xbench.cpp \
+  -L$N/lib -lnng -Wl,-rpath,$N/lib -lpthread
+# both binaries go in $XBIN next to xbench; bench_matrix.py uses xbench_nng for nng-* servers
+
+S=libzmq-c,omq-hardened,rzmq-uring,nng-device,nng-device-tuned,nng-loop
+python3 scripts/bench_matrix.py --tests tput,pingpong --reps 3 --duration 4 --servers $S --out results/bench_nng.jsonl
+python3 scripts/bench_matrix.py --tests fanout4,slowsub,flood --sizes 100KB,1MB --reps 2 --duration 4 \
+  --servers $S --out results/bench_nng.jsonl
+python3 scripts/pivot.py results/bench_nng.jsonl --servers $S
+
+# traffic a subscriber did not subscribe to (SP filters in the subscriber)
+for s in libzmq-c omq-hardened rzmq-uring nng-device-tuned; do
+  python3 scenarios/topic_filter_cost.py $s --json results/topic_filter_cost.jsonl; done
+# a message header declaring a huge body (NNG allocates the declared size unless RECVMAXSZ is set)
+python3 scenarios/sp_raw.py 127.0.0.1 <frontend-port> pub $((2**44)) 0
+# userspace copies / zero-filled bytes per forwarded byte
+XBENCH=xbench_nng MEMCOUNT_SO=/tmp/libmemcount.so scripts/copyprobe.sh "$XBIN/nng_proxy --recvbuf 1000" \
+  "--size 1048576 --mode window --window 8 --duration 3"
+```
+
 ## Files
 
 - `servers/` — the four Rust proxy servers (one CLI). `omq_proxy` exposes `--io-threads`, `--hwm`,
   `--slot-cap`, `--max-msg-size`, `--xpub-nodrop`, `--run-on main|ctx`. `omq_proxy_hardened` bakes
   in the recommended workarounds.
 - `c_proxy/xproxy.c` — libzmq C-API proxy, built against system libzmq and against omq's shim.
-- `client/xbench.cpp` — the independent load generator + verifier.
+  `c_proxy/nng_proxy.c` — NNG pub/sub forwarder (`nng_device` or a recv/send loop).
+- `client/xbench.cpp` — the independent load generator + verifier (`-DXBENCH_NNG` builds the
+  SP/NNG variant, `xbench_nng`).
 - `scenarios/` — `conformance.py` (black-box libzmq-semantics suite), `churn_soak.py`,
   `zmtp_raw.py` (raw ZMTP peer for the crash/oversized-frame tests), `zmtp30_publisher.py`.
 - `scripts/` — `bench_matrix.py`, `runone.sh` (RSS/CPU sampling wrapper), `summarize.py`.

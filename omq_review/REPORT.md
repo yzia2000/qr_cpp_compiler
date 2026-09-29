@@ -16,6 +16,8 @@ Compared against:
 | `omq-c` | the **same C server source** linked against `libomq_zmq.so` (omq's libzmq drop-in) | reports itself as libzmq 4.3.6 |
 | `zeromq` | zmq.rs (`zeromq` crate 0.6.0) | the other pure-Rust implementation |
 | `rzmq-*` | rzmq 0.5.26, Tokio or io_uring backend | no XPUB/XSUB: subscribe-all SUB→PUB forwarder ([addendum](#addendum-rzmq-0526-and-does-io_uring-make-it-faster)) |
+| `rzmqzc-*` | rzmq 0.5.26 + this review's patches (`rzmq_zc/patches/`) | work in progress ([addendum 2](#addendum-2-patching-rzmq-for-zero-copy)) |
+| `nng-*` | NNG 1.12.4 (nanomsg-next-generation), `nng_device()` or a recv/send loop | different wire protocol (SP), driven by `xbench_nng` ([addendum 3](#addendum-3-nng-nanomsg-next-generation-1124)) |
 
 ## Verdict
 
@@ -53,7 +55,15 @@ omq is well ahead of zmq.rs; it is not yet at libzmq's level for this use case.
 In short: io_uring makes rzmq fast at ~100 KB (at or above libzmq) but not at 256 KB–1 MB, where
 libzmq on plain epoll stays ~1.6× ahead; rzmq has no XPUB/XSUB at all, and its PUB blocks on a slow
 subscriber by default. (omq itself does not use io_uring; its io_uring backend was removed in July
-2026, so io_uring plays no part in the omq-vs-libzmq gap.)
+2026, so io_uring plays no part in the omq-vs-libzmq gap.) Patching rzmq's receive path to zero
+userspace copies lifts it by about 30–55% and fixes its blocking PUB
+([addendum 2](#addendum-2-patching-rzmq-for-zero-copy), work in progress).
+
+**NNG 1.12.4 was added last** — see [addendum 3](#addendum-3-nng-nanomsg-next-generation-1124). It
+is not a replacement for an XPUB/XSUB broker: a different wire protocol, no subscriptions on the
+wire (every subscriber receives every message — 5,800× the bytes a light subscriber wanted, next
+to one 1 MB flow), 19–22% loss at 100–256 KB with its documented `nng_device()` broker on defaults,
+no way to make a publisher block, and about half libzmq's throughput at every size.
 
 
 ## Findings at a glance
@@ -670,6 +680,185 @@ broker, and its default blocking PUB lets one slow subscriber stall everyone unl
 `SNDTIMEO=0`. It is not a drop-in replacement for a libzmq XPUB/XSUB broker either. The receive
 copies and the blocking PUB are both fixed by the patches in
 [Addendum 2](#addendum-2-patching-rzmq-for-zero-copy).
+
+## Addendum 2: patching rzmq for zero copy
+
+**Work in progress** — this was stopped before the final benchmark run; the patches are in
+`rzmq_zc/patches/` (against 0.5.26, applied by `rzmq_zc/prepare.sh`). What was measured:
+
+* **Where rzmq copied.** Counting `memcpy`/`memmove` ≥ 4 KiB and `realloc` moves in the proxy
+  process (`scripts/memcount.c` via `LD_PRELOAD`), stock rzmq copies **1.75×** every forwarded byte
+  in userspace on its io_uring path at 1 MB (Tokio path 2.02×; libzmq 0.02×, omq-hardened 0.16×).
+  Sampled stacks put 96% of it in `ZmtpEngine::on_network_bytes` (ring slot → accumulator) and
+  the rest in `BytesMut` regrowth — all on the receive side.
+* **Correction to the rzmq addendum:** the send side had no copy to remove. `IO_URING_SNDZEROCOPY`
+  never reached the data path (0 `SEND_ZC` ops in the kernel's `io_uring_submit_req` tracepoint;
+  data went out as `WRITEV` from the message buffers).
+* **Patches.** `0001` fixes a latent multishot-cancel bug (the cancel CQE usually arrives before
+  the cancelled op's `-ECANCELED`, which made the worker force-close the connection). `0002`
+  receives large frame bodies straight into their message buffer (`IO_URING_RCV_DIRECT_THRESHOLD`,
+  default 32 KiB) — userspace copies **1.75× → 0.00×** at 1 MB and 1.66× → 0.00× at 100 KB — and
+  makes the zero-copy option issue a real `SENDMSG_ZC` from the message buffers, falling back to
+  `writev` when the kernel reports copying anyway (it did for 100% of sends over loopback).
+  `0003` makes PUB drop for a full subscriber instead of blocking the others (RFC 29 / libzmq).
+* **Effect (spot checks, 2 runs, same session):** 8-in-flight throughput 18,150 vs 14,031 msg/s
+  at 100 KB and 2,121 vs 1,391 at 1 MB against stock io_uring rzmq; 1 MB flood 2,015 vs 1,294. With a
+  slow subscriber (an earlier full run, same PUB patch), the fast one gets 20,360 msg/s at 100 KB
+  (stock: 193) and 1,943 at 1 MB (stock: 224). At 512 KB–1 MB it stays behind libzmq; after the kernel's socket copies, the next cost is
+  futex wake-ups between rzmq's io_uring worker and its Tokio threads.
+* **Validation:** 218/218 of rzmq's tests in the affected suites pass on the patched tree (211
+  existing + 7 new); conformance unchanged at 15/21; 587 connections dropped mid-frame (306 by RST)
+  during 62k verified 1 MB messages with no loss or corruption; survives the C1 header.
+* **Known issue, not fixed in the committed `0002`:** a message a little larger than the previous
+  one (by less than the threshold) is finished with 1-byte receives — correct data, very slow.
+  The one-line fix was written but not built or tested. The final same-session benchmark was not
+  run.
+
+## Addendum 3: NNG (nanomsg-next-generation) 1.12.4
+
+*Added after the follow-up request "Can you try nanomsg nng as well now".*
+
+### Short answer
+
+* **NNG can't stand in for a ZeroMQ XPUB/XSUB broker.** It speaks a different wire protocol
+  (Scalability Protocols, "SP"), so every publisher and subscriber would have to move to NNG too.
+  And SP pub/sub has no subscriptions on the wire: subscribers filter locally, so a broker can
+  neither propagate subscriptions upstream nor filter per subscriber — **every subscriber receives
+  every message**. A subscriber that wanted only its own 1 KiB × 200 msg/s topic received
+  **~5,800× the bytes it asked for** (7.2 GB in 6 s) while it shared the broker with one 1 MB flow;
+  through libzmq, omq-hardened or rzmq it received 1.1×.
+* **The documented NNG broker loses data out of the box.** `nng_device()` between a raw SUB and a
+  raw PUB lost **21.5% of 100 KB, 21.6% of 256 KB and 8.8% of 1 MB messages** at 8 in flight with
+  one healthy subscriber, and **36–50% with four**. Its ingress raw SUB queues **one** message and
+  silently discards the next if the forwarding loop hasn't taken it yet (`xsub.c`: "we just want
+  to discard the message and carry on") — there is no TCP backpressure to the publisher as in
+  libzmq. Raising `NNG_OPT_RECVBUF` on that socket to 1000 brings loss to **0%**. NNG's 2.0 branch
+  has the same code.
+* **About half libzmq's speed at 100 KB–1 MB.** The best NNG variant did 9,449 vs 16,718 msg/s at
+  100 KB and 1,641 vs 3,013 at 1 MB (51–57% of libzmq at every size). It copies nothing in userspace
+  (0.00×), but zero-fills every message buffer (`calloc`), takes 4–28 page faults per message and
+  hands each message across its task threads: **0.12–0.16 ms of CPU per 100 KB message vs libzmq's
+  0.06, and 0.63–0.64 ms per 1 MB message vs 0.32**. Latency is on par at 100 KB and ~1.5× libzmq's at
+  1 MB.
+* **No backpressure, by design.** NNG's PUB never blocks and has no `XPUB_NODROP` equivalent; its
+  per-subscriber queue is 16 messages by default and evicts the **oldest** queued message when full
+  (libzmq keeps 1000 and drops the newest). In open-loop flood at 100 KB, 74–80% of messages were
+  lost where libzmq's blocking publisher lost 0.2%.
+* **No crash on hostile input** (C: a failed allocation just closes the connection), but the
+  default `NNG_OPT_RECVMAXSZ` is **unlimited** in 1.12 (1 GiB on the 2.0 branch) and the broker
+  allocates whatever an 8-byte length header announces: 20 peers each announcing 8 GiB made it
+  reserve **160 GB** of address space (resident memory grows only as bytes arrive). A 16 MiB
+  `RECVMAXSZ` rejects all of them.
+* **Slow subscribers don't stall anyone** — with deeper queues the fast subscriber kept NNG's usual
+  rate with no loss (on defaults the device also dropped 23–35% of the *fast* subscriber's messages).
+
+### How it was tested
+
+* NNG **1.12.4** (latest stable, 2026-08-30; 2.0.0-beta.2 also exists), built from source with
+  default options. Its Linux I/O is epoll; NNG has no io_uring backend.
+* Broker `c_proxy/nng_proxy.c`: **`nng-device`** — `nng_device()` over raw SUB → raw PUB with NNG's
+  defaults (the documented recipe); **`nng-device-tuned`** — the same with 1000-message ingress and
+  per-subscriber queues and a 16 MiB `RECVMAXSZ` (the analogue of `omq-hardened`); **`nng-loop`** —
+  a cooked SUB subscribed to everything, a cooked PUB, and one thread doing `nng_recvmsg` →
+  `nng_sendmsg`, NNG defaults.
+* Client: the same `xbench.cpp` built with `-DXBENCH_NNG` — NNG `pub0`/`sub0` sockets instead of
+  libzmq's, with identical payload stamping, byte-level verification, modes and JSON. Its sockets
+  get 1000-message queues (libzmq's default HWM) so that loss is the broker's. The ZeroMQ build is
+  unchanged (its preprocessed source is token-identical to before).
+* libzmq, omq-hardened and stock rzmq were re-run in the same session. Medians of 3 runs for
+  throughput and latency, 2 for the rest. No run of any server saw corruption, duplication or
+  reordering, and no broker died.
+
+### Results (same session)
+
+**Throughput, 8 in flight, 1 subscriber (msg/s):**
+
+| size | libzmq | omq-hardened | rzmq io_uring | NNG device (defaults) | NNG device, tuned | NNG loop |
+|---|---|---|---|---|---|---|
+| 100 KB | **16,718** | 15,931 | 14,575 | 7,767 (**21.5% lost**) | 8,719 | 9,449 |
+| 256 KB | **9,823** | 7,544 | 6,188 | 4,407 (**21.6% lost**) | 4,854 | 5,003 |
+| 512 KB | **5,180** | 3,967 | 2,619 | 2,721 (**12.9% lost**) | 2,877 | 2,912 |
+| 1 MB | **3,013** | 2,151 | 1,462 | 1,507 (**8.8% lost**) | 1,614 | 1,641 |
+
+**Round-trip latency, 1 in flight (p50 / p99 µs):**
+
+| size | libzmq | omq-hardened | rzmq io_uring | NNG device | NNG device, tuned | NNG loop |
+|---|---|---|---|---|---|---|
+| 100 KB | 152 / 229 | 156 / 238 | 128 / 209 | 152 / 230 | 152 / 227 | 151 / 249 |
+| 256 KB | 196 / 352 | 195 / 358 | 252 / 412 | 228 / 381 | 211 / 316 | 211 / 334 |
+| 512 KB | 283 / 478 | 282 / 505 | 404 / 600 | 304 / 430 | 309 / 533 | 306 / 459 |
+| 1 MB | **478 / 801** | 700 / 999 | 757 / 1,107 | 714 / 1,106 | 720 / 1,088 | 703 / 1,037 |
+
+**Fan-out to 4 subscribers, 8 in flight (msg/s per subscriber):**
+
+| size | libzmq | omq-hardened | rzmq io_uring | NNG device | NNG device, tuned | NNG loop |
+|---|---|---|---|---|---|---|
+| 100 KB | 6,508 | 6,494 | **7,781** | 3,728 (**36.4% lost**) | 4,272 | 4,493 |
+| 1 MB | 1,071 | **1,207** | 670 | 647 (**49.7% lost**) | 729 | 733 |
+
+**One slow subscriber (5 ms per message): what the fast subscriber gets (msg/s; its loss):**
+
+| size | libzmq | omq-hardened | rzmq io_uring | NNG device | NNG device, tuned | NNG loop |
+|---|---|---|---|---|---|---|
+| 100 KB | **16,487** (0%) | 12,098 (0%) | 195 (0%) | 5,469 (**35% lost**) | 6,406 (0%) | 6,952 (0%) |
+| 1 MB | 390 (0%) | **2,164** (0%) | 209 (0%) | 992 (**25% lost**) | 1,060 (0%) | 1,097 (0%) |
+
+**Open-loop flood (delivered msg/s, loss).** The ZeroMQ clients' publisher blocks at its HWM
+(`XPUB_NODROP`); NNG's cannot, so an over-fast NNG publisher drops instead of slowing down:
+
+| size | libzmq | omq-hardened | rzmq io_uring | NNG device | NNG device, tuned | NNG loop |
+|---|---|---|---|---|---|---|
+| 100 KB | 14,057 (0.2%) | 16,819 (38.5%) | 16,473 (0%) | 5,868 (80.2%) | 6,512 (80.4%) | 7,170 (74.2%) |
+| 1 MB | 2,865 (0%) | 2,006 (32.4%) | 1,420 (0%) | 1,425 (10.6%) | 1,473 (0%) | 1,576 (0.1%) |
+
+**Traffic a subscriber did not subscribe to** (`scenarios/topic_filter_cost.py`): one light flow
+(1 KiB, 200 msg/s, its own topic) beside one heavy flow (1 MB, 8 in flight, another topic); bytes the
+kernel delivered to the light subscriber's socket over 6 s:
+
+| broker | bytes delivered | × what it subscribed to | light flow p99 |
+|---|---|---|---|
+| libzmq | 1.34 MB | 1.1× | 4.7 ms |
+| omq-hardened | 1.34 MB | 1.1× | 5.5 ms |
+| rzmq io_uring | 1.35 MB | 1.1× | 6.8 ms |
+| NNG device, tuned | **7.2 GB** | **5,831×** | 11.4 ms |
+| NNG loop | **7.3 GB** | **5,927×** | 12.7 ms |
+
+**Per forwarded message** (`scripts/cpuprobe.sh`, `scripts/copyprobe.sh`, `results/nng_cpu_copies.txt`):
+
+| | libzmq 100 KB | NNG 100 KB (tuned / loop) | libzmq 1 MB | NNG 1 MB (tuned / loop) |
+|---|---|---|---|---|
+| server CPU (ms) | 0.060 | 0.161 / 0.120 | 0.318 | 0.641 / 0.630 |
+| page faults | 0.2 | 5.7 / 4.2 | 1.1 | 23.6 / 28.0 |
+| userspace copies | 0.16× | 0.00× | 0.02× | 0.00× |
+| zero-filled (`calloc`) | 0 | 1.00× | 0 | 1.00× |
+
+In `perf` at 1 MB, NNG's largest kernel costs are context switches and wake-ups (~34% of samples,
+19 threads), then the two socket copies (~21%), `memset` from the zero-fill (~7%) and page faults.
+
+### NNG vs libzmq as a pub/sub broker
+
+| | libzmq `zmq_proxy(XSUB, XPUB)` | NNG 1.12.4 `nng_device` |
+|---|---|---|
+| wire protocol | ZMTP 3.x | SP (incompatible) |
+| subscriptions | sent upstream; XPUB filters per subscriber | none on the wire; every subscriber gets everything |
+| loss with healthy consumers | none observed | 9–22% (1 subscriber), 36–50% (4), 23–35% beside a slow one, on defaults; none once `NNG_OPT_RECVBUF` is raised |
+| broker ingress when behind | stops reading (TCP backpressure) | discards the message |
+| slow subscriber | its queue (HWM 1000) fills; new messages dropped for it | its queue (16) fills; oldest queued message evicted |
+| publisher blocking | PUB never blocks; `XPUB_NODROP` opt-in | never; no option |
+| max message size | unlimited by default; allocates on header | unlimited in 1.12 (1 GiB on 2.0); allocates on header |
+| per-message cost | receive into the message, shared buffers on fan-out | same, plus a `calloc` zero-fill and task-thread handoffs |
+| heartbeats | optional ZMTP PING/PONG | none (TCP keepalive only) |
+
+### Bottom line on NNG
+
+NNG is a careful library — it didn't crash on anything, never corrupted a byte, copies nothing in
+userspace and never lets a slow subscriber stall the rest — but it doesn't fit this use case. As a
+broker for 100 KB–1 MB topics it sends every subscriber every message (thousands of times the
+wanted bytes when topics differ), its documented `nng_device()` recipe drops 9–50% of messages with
+healthy consumers until you enlarge one queue, it offers no backpressure at all, and it runs at
+about half libzmq's throughput with twice the CPU per message. If every subscriber wants nearly all
+messages and you control all endpoints, a tuned NNG forwarder is lossless in closed loop and
+simple — but slower. For XPUB/XSUB semantics at these sizes, libzmq remains the one to use.
 
 ## If you must run omq for this today (native API)
 

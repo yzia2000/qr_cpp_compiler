@@ -39,6 +39,11 @@ SERVERS = {
     "rzmq-tokio": [f"{XTGT}/rzmq_proxy", "--mode", "tokio"],
     "rzmq-tokio-nothrottle": [f"{XTGT}/rzmq_proxy", "--mode", "tokio", "--throttle", "off"],
     "rzmq-uring": [f"{XTGT}/rzmq_proxy", "--mode", "uring", "--throttle", "off"],
+    # NNG 1.12.4 (SP protocol, not ZMTP): c_proxy/nng_proxy.c, driven by xbench_nng
+    "nng-device": [f"{XBIN}/nng_proxy"],  # nng_device(raw SUB, raw PUB), NNG defaults
+    "nng-device-tuned": [f"{XBIN}/nng_proxy", "--recvbuf", "1000", "--sendbuf", "1000",
+                         "--recvmaxsz", str(16 << 20)],
+    "nng-loop": [f"{XBIN}/nng_proxy", "--mode", "loop"],  # cooked SUB->PUB loop, NNG defaults
     # patched rzmq (rzmq_zc/patches): direct receive + SENDMSG_ZC + non-blocking PUB
     "rzmqzc-tokio": [f"{XZC}/rzmq_proxy_zc", "--mode", "tokio"],
     "rzmqzc-uring": [f"{XZC}/rzmq_proxy_zc", "--mode", "uring", "--throttle", "off"],
@@ -105,7 +110,8 @@ def run_one(server, test, size_name, rep, duration, out_dir):
         if "READY" in open(log).read():
             break
         time.sleep(0.01)
-    cargs = [f"{XBIN}/xbench", "--pub", fe, "--sub", be, "--size", str(SIZES[size_name]),
+    client = "xbench_nng" if server.startswith("nng") else "xbench"  # SP vs ZMTP client
+    cargs = [f"{XBIN}/{client}", "--pub", fe, "--sub", be, "--size", str(SIZES[size_name]),
              "--duration", str(duration), "--warmup", "1", "--label", server] + TESTS[test]
     if test == "rate":
         cargs += ["--rate", str(RATES[size_name])]

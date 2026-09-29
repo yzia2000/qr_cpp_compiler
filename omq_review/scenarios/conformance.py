@@ -38,6 +38,12 @@ SERVERS = {
     # rzmq 0.5.26 has no XPUB/XSUB: subscribe-all SUB->PUB forwarder (servers/src/bin/rzmq_proxy.rs)
     "rzmq-tokio": [f"{XTGT}/rzmq_proxy", "--mode", "tokio"],
     "rzmq-uring": [f"{XTGT}/rzmq_proxy", "--mode", "uring", "--throttle", "off"],
+    # NNG (SP protocol, not ZMTP): only for the NNG-aware scenarios (topic_filter_cost.py);
+    # the pyzmq scenarios in this file cannot talk to them.
+    "nng-device": [f"{XBIN}/nng_proxy"],
+    "nng-device-tuned": [f"{XBIN}/nng_proxy", "--recvbuf", "1000", "--sendbuf", "1000",
+                         "--recvmaxsz", str(16 << 20)],
+    "nng-loop": [f"{XBIN}/nng_proxy", "--mode", "loop"],
     # patched rzmq (rzmq_zc/patches): direct receive + SENDMSG_ZC + non-blocking PUB
     "rzmqzc-tokio": [f"{XZC}/rzmq_proxy_zc", "--mode", "tokio"],
     "rzmqzc-uring": [f"{XZC}/rzmq_proxy_zc", "--mode", "uring", "--throttle", "off"],
@@ -577,7 +583,7 @@ def run(servers, only, extra_args):
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
-    ap.add_argument("--servers", default=",".join(SERVERS))
+    ap.add_argument("--servers", default=",".join(k for k in SERVERS if not k.startswith("nng")))
     ap.add_argument("--only", default="")
     ap.add_argument("--json", default="")
     a = ap.parse_args()

@@ -1,0 +1,31 @@
+# per forwarded message, 8 in flight, 1 subscriber (scripts/cpuprobe.sh, scripts/copyprobe.sh)
+## libzmq-c size=102400
+msgs=53453 msg/s=17823 minflt/msg=0.2 user_ms/msg=0.007 sys_ms/msg=0.053
+  memcpy_bytes                  899.2 MB  =  0.16 x payload received by proxy
+  calloc_bytes                    0.0 MB  =  0.00 x payload received by proxy
+  TOTAL userspace copy          899.2 MB  =  0.16 x payload in   (0.16 x payload out)  [calloc'd bytes reported separately]
+## nng-device-tuned size=102400
+msgs=25343 msg/s=8448 minflt/msg=5.7 user_ms/msg=0.021 sys_ms/msg=0.140
+  memcpy_bytes                    0.0 MB  =  0.00 x payload received by proxy
+  calloc_bytes                 2513.5 MB  =  1.00 x payload received by proxy
+  TOTAL userspace copy            0.0 MB  =  0.00 x payload in   (0.00 x payload out)  [calloc'd bytes reported separately]
+## nng-loop size=102400
+msgs=29541 msg/s=9848 minflt/msg=4.2 user_ms/msg=0.022 sys_ms/msg=0.098
+  memcpy_bytes                    0.0 MB  =  0.00 x payload received by proxy
+  calloc_bytes                 2940.8 MB  =  1.00 x payload received by proxy
+  TOTAL userspace copy            0.0 MB  =  0.00 x payload in   (0.00 x payload out)  [calloc'd bytes reported separately]
+## libzmq-c size=1048576
+msgs=9779 msg/s=3262 minflt/msg=1.1 user_ms/msg=0.012 sys_ms/msg=0.306
+  memcpy_bytes                  144.5 MB  =  0.02 x payload received by proxy
+  calloc_bytes                    0.0 MB  =  0.00 x payload received by proxy
+  TOTAL userspace copy          144.5 MB  =  0.02 x payload in   (0.02 x payload out)  [calloc'd bytes reported separately]
+## nng-device-tuned size=1048576
+msgs=4726 msg/s=1575 minflt/msg=23.6 user_ms/msg=0.091 sys_ms/msg=0.550
+  memcpy_bytes                    0.0 MB  =  0.00 x payload received by proxy
+  calloc_bytes                 5019.9 MB  =  1.00 x payload received by proxy
+  TOTAL userspace copy            0.0 MB  =  0.00 x payload in   (0.00 x payload out)  [calloc'd bytes reported separately]
+## nng-loop size=1048576
+msgs=4698 msg/s=1568 minflt/msg=28.0 user_ms/msg=0.085 sys_ms/msg=0.545
+  memcpy_bytes                    0.0 MB  =  0.00 x payload received by proxy
+  calloc_bytes                 4816.4 MB  =  1.00 x payload received by proxy
+  TOTAL userspace copy            0.0 MB  =  0.00 x payload in   (0.00 x payload out)  [calloc'd bytes reported separately]

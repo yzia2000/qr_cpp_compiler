@@ -22,7 +22,21 @@
 //           by every fast subscriber). Lossless expected when W < HWM.
 //   rate    open loop at --rate msgs/s.
 //   flood   open loop, as fast as zmq_msg_send accepts.
+//
+// Built with -DXBENCH_NNG (binary xbench_nng) the same client speaks NNG's SP pub/sub
+// (pub0/sub0, libnng) instead of ZMTP, for NNG brokers. Payload, stamping, verification,
+// modes and JSON output are the same code. SP messages are single-part (no --multipart),
+// and pub0 never blocks, so --pub-nodrop has no NNG equivalent (ignored). Unless --hwm is
+// given, both NNG sockets get 1000-message queues (libzmq's default HWM) instead of NNG's
+// own defaults (16 per subscriber pipe on pub0, 128 on sub0), so that loss measured by
+// the client is the broker's, not the client's.
+#ifdef XBENCH_NNG
+#include <nng/nng.h>
+#include <nng/protocol/pubsub0/pub.h>
+#include <nng/protocol/pubsub0/sub.h>
+#else
 #include <zmq.h>
+#endif
 
 #include <algorithm>
 #include <atomic>
@@ -210,15 +224,46 @@ struct Shared {
     std::atomic<bool> stop_subs{false};
 };
 
+#ifdef XBENCH_NNG
+constexpr int kNngDefaultQueue = 1000;  // messages; libzmq's default HWM
+
+void nng_check(int rv, const char *what) {
+    if (rv != 0) {
+        fprintf(stderr, "%s: %s\n", what, nng_strerror(rv));
+        exit(2);
+    }
+}
+
+int nng_queue_len(const Config &cfg) {
+    return cfg.hwm >= 0 ? std::min(std::max(cfg.hwm, 1), 8192) : kNngDefaultQueue;
+}
+
+// Frees the received message on every path out of a loop iteration.
+struct NngMsgGuard {
+    nng_msg *m = nullptr;
+    ~NngMsgGuard() {
+        if (m) nng_msg_free(m);
+    }
+};
+#else
 void set_int(void *s, int opt, int v) {
     if (zmq_setsockopt(s, opt, &v, sizeof v) != 0) {
         fprintf(stderr, "setsockopt %d: %s\n", opt, zmq_strerror(zmq_errno()));
         exit(2);
     }
 }
+#endif
 
 void subscriber(const Config &cfg, SubStats &st, Shared &sh,
                 const std::vector<std::vector<uint8_t>> &bases, std::atomic<int> &ready) {
+#ifdef XBENCH_NNG
+    nng_socket s;
+    nng_check(nng_sub0_open(&s), "sub0 open");
+    nng_check(nng_socket_set_int(s, NNG_OPT_RECVBUF, nng_queue_len(cfg)), "sub RECVBUF");
+    nng_check(nng_socket_set_ms(s, NNG_OPT_RECVTIMEO, 100), "sub RECVTIMEO");
+    nng_check(nng_sub0_socket_subscribe(s, kTopic, kTopicLen), "sub subscribe");
+    nng_check(nng_dial(s, cfg.sub_ep.c_str(), nullptr, NNG_FLAG_NONBLOCK), "sub dial");
+#else
     void *ctx = zmq_ctx_new();
     void *s = zmq_socket(ctx, ZMQ_SUB);
     if (cfg.hwm >= 0) set_int(s, ZMQ_RCVHWM, cfg.hwm);
@@ -229,9 +274,24 @@ void subscriber(const Config &cfg, SubStats &st, Shared &sh,
         fprintf(stderr, "sub connect: %s\n", zmq_strerror(zmq_errno()));
         exit(2);
     }
+#endif
     ready.fetch_add(1);
     st.seen.reserve(1 << 20);
     uint64_t rnd = 0x1234567ull + st.id;
+#ifdef XBENCH_NNG
+    while (!sh.stop_subs.load(std::memory_order_relaxed)) {
+        NngMsgGuard guard;
+        int rv = nng_recvmsg(s, &guard.m, 0);
+        if (rv == NNG_ETIMEDOUT) continue;
+        if (rv != 0) break;
+        uint64_t t = now_ns();
+        Verdict v = Verdict::Ok;
+        const uint8_t *d = static_cast<const uint8_t *>(nng_msg_body(guard.m));
+        size_t total = nng_msg_len(guard.m);
+        if (total < kTopicLen || memcmp(d, kTopic, kTopicLen)) v = Verdict::BadTopic;
+        const uint8_t *payload = d + kTopicLen;
+        size_t plen = total >= kTopicLen ? total - kTopicLen : 0;
+#else
     zmq_msg_t m1, m2;
     zmq_msg_init(&m1);
     zmq_msg_init(&m2);
@@ -271,6 +331,7 @@ void subscriber(const Config &cfg, SubStats &st, Shared &sh,
             payload = d + kTopicLen;
             plen = zmq_msg_size(&m1) >= kTopicLen ? zmq_msg_size(&m1) - kTopicLen : 0;
         }
+#endif
         Header h{};
         if (v == Verdict::Ok) {
             rnd = rnd * 6364136223846793005ull + 1442695040888963407ull;
@@ -309,10 +370,14 @@ void subscriber(const Config &cfg, SubStats &st, Shared &sh,
         }
         if (st.slow && cfg.slow_delay_us > 0) std::this_thread::sleep_for(std::chrono::microseconds(cfg.slow_delay_us));
     }
+#ifdef XBENCH_NNG
+    nng_close(s);
+#else
     zmq_msg_close(&m1);
     zmq_msg_close(&m2);
     zmq_close(s);
     zmq_ctx_term(ctx);
+#endif
 }
 
 double pct(std::vector<uint32_t> &v, double p) {
@@ -373,6 +438,28 @@ int main(int argc, char **argv) {
     }
     while (ready.load() < nsub) std::this_thread::sleep_for(std::chrono::milliseconds(1));
 
+#ifdef XBENCH_NNG
+    if (cfg.multipart) {
+        fprintf(stderr, "--multipart: SP messages are single-part\n");
+        return 2;
+    }
+    nng_socket pub;
+    nng_check(nng_pub0_open(&pub), "pub0 open");
+    nng_check(nng_socket_set_int(pub, NNG_OPT_SENDBUF, nng_queue_len(cfg)), "pub SENDBUF");
+    nng_check(nng_dial(pub, cfg.pub_ep.c_str(), nullptr, NNG_FLAG_NONBLOCK), "pub dial");
+    auto send_one = [&](uint64_t seq, uint32_t flags, size_t size) -> bool {
+        nng_msg *m;
+        if (nng_msg_alloc(&m, size + kTopicLen) != 0) return false;
+        uint8_t *d = static_cast<uint8_t *>(nng_msg_body(m));
+        memcpy(d, kTopic, kTopicLen);
+        fill_payload(d + kTopicLen, size, seq, flags, bases);
+        if (nng_sendmsg(pub, m, 0) != 0) {
+            nng_msg_free(m);
+            return false;
+        }
+        return true;
+    };
+#else
     void *pctx = zmq_ctx_new();
     void *pub = zmq_socket(pctx, ZMQ_PUB);
     if (cfg.hwm >= 0) set_int(pub, ZMQ_SNDHWM, cfg.hwm);
@@ -403,6 +490,7 @@ int main(int argc, char **argv) {
         return true;
     };
     (void)frame_len;
+#endif
 
     // Phase 1: wait for subscriptions to propagate SUB -> XPUB -> proxy -> XSUB -> PUB.
     uint64_t t_probe0 = now_ns();
@@ -465,7 +553,11 @@ int main(int argc, char **argv) {
             next_send += uint64_t(interval_ns);
         }
         if (!send_one(seq, 0, cfg.size)) {
+#ifdef XBENCH_NNG
+            fprintf(stderr, "send failed\n");
+#else
             fprintf(stderr, "send failed: %s\n", zmq_strerror(zmq_errno()));
+#endif
             break;
         }
         seq++;
@@ -493,8 +585,12 @@ int main(int argc, char **argv) {
     }
     sh.stop_subs.store(true);
     for (auto &th : threads) th.join();
+#ifdef XBENCH_NNG
+    nng_close(pub);
+#else
     zmq_close(pub);
     zmq_ctx_term(pctx);
+#endif
 
     // Report.
     double mdur = (measure_t1 - measure_t0) / 1e9;

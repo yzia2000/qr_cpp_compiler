@@ -4,6 +4,7 @@
 # memcount.c LD_PRELOAD shim (memcpy/memmove >= 4 KiB and realloc moves), drives it with
 # xbench, and diffs the shim's counters from just before to just after the run.
 #   MEMCOUNT_SO: the built shim (gcc -O2 -shared -fPIC -o libmemcount.so memcount.c -ldl -lpthread)
+#   XBENCH: client binary in $XBIN (default xbench; xbench_nng for NNG servers)
 set -u
 srv=$1; cargs=$2
 MEMCOUNT_SO=${MEMCOUNT_SO:-/tmp/libmemcount.so}
@@ -15,7 +16,7 @@ MEMCOUNT_OUT=$mc LD_PRELOAD=$MEMCOUNT_SO $srv --frontend "$fe" --backend "$be" >
 spid=$!
 for _ in $(seq 100); do grep -q READY "$log" 2>/dev/null && break; sleep 0.05; done
 sleep 0.2; cat $mc > $log.a
-$XBIN/xbench --pub "$fe" --sub "$be" --json "$js" --label t --warmup 0 $cargs 2> "$log.client"
+$XBIN/${XBENCH:-xbench} --pub "$fe" --sub "$be" --json "$js" --label t --warmup 0 $cargs 2> "$log.client"
 sleep 0.3; cat $mc > $log.b
 kill $spid 2>/dev/null; wait $spid 2>/dev/null
 python3 - "$log" "$js" "$log.a" "$log.b" <<'PY'
@@ -30,9 +31,9 @@ size=j.get("size")
 sent=j.get("sent")
 payload_in=sent*size; payload_out=recv*size
 print(f"sent={sent} recv_total={recv} size={size} lost+corrupt+dup+reorder={bad} msg/s={[s['msgs_s'] for s in j['subs_detail']]}")
-for k in ("memcpy_bytes","memmove_bytes","realloc_moved_bytes"):
-    print(f"  {k:22s} {d[k]/1e6:12.1f} MB  = {d[k]/payload_in:5.2f} x payload received by proxy")
+for k in ("memcpy_bytes","memmove_bytes","realloc_moved_bytes","calloc_bytes"):
+    print(f"  {k:22s} {d.get(k,0)/1e6:12.1f} MB  = {d.get(k,0)/payload_in:5.2f} x payload received by proxy")
 tot=d["memcpy_bytes"]+d["memmove_bytes"]+d["realloc_moved_bytes"]
-print(f"  TOTAL userspace copy   {tot/1e6:12.1f} MB  = {tot/payload_in:5.2f} x payload in   ({tot/max(payload_out,1):.2f} x payload out)")
+print(f"  TOTAL userspace copy   {tot/1e6:12.1f} MB  = {tot/payload_in:5.2f} x payload in   ({tot/max(payload_out,1):.2f} x payload out)  [calloc'd bytes reported separately]")
 PY
 rm -f "$log" "$log.client" "$js" "$log.a" "$log.b" "$mc"
