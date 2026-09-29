@@ -8,3 +8,5 @@ xproxy_omqc
 
 __pycache__/
 *.pyc
+# rzmq_zc/prepare.sh output (upstream rzmq checkout with the patches applied)
+/rzmq_zc/src-rzmq

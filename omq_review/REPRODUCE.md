@@ -97,6 +97,49 @@ python3 scenarios/conformance.py --servers rzmq-tokio,rzmq-uring --json results/
 strace -f -c -p <rzmq_proxy pid>   # while xbench runs
 ```
 
+## Patched rzmq (zero-copy receive, SENDMSG_ZC, non-blocking PUB)
+
+```sh
+# 1. upstream rzmq at the 0.5.26 release commit + rzmq_zc/patches (clones github.com/excsn/rzmq;
+#    pass a local clone path to skip the fetch). Creates rzmq_zc/src-rzmq (gitignored).
+rzmq_zc/prepare.sh
+
+# 2. rzmq_proxy_zc = servers/src/bin/rzmq_proxy.rs built against the patched rzmq
+(cd rzmq_zc/server && CARGO_TARGET_DIR=/home/user/rzmq-zc-target cargo build --release)
+#    extra flag: --rcv-direct-threshold N   (patch default 32768; 0 = stock receive path)
+
+# 3. rzmq's own tests on the patched tree, including the two new test files
+(cd rzmq_zc/src-rzmq/core && cargo test --release --features io-uring --lib \
+   --test io_uring_direct_recv --test pub_stalled_subscriber --test io_uring_resource_exhaustion \
+   --test stress --test pub_sub --test push_pull --test maxmsgsize --test subscription_trie_contention \
+   -- --test-threads=1)
+
+# 4. proxy-level checks and the same-session comparison (XZC points at the patched binary)
+export XZC=/home/user/rzmq-zc-target/release
+python3 scenarios/conformance.py --servers rzmqzc-uring,rzmqzc-tokio
+python3 scenarios/midframe_churn.py rzmqzc-uring --duration 45 --conns 1200   # disconnects mid-frame
+python3 scenarios/zmtp_raw.py 127.0.0.1 <frontend-port> PUB $((2**44)) 200000   # C1 against rzmqzc-*
+S=libzmq-c,omq-hardened,rzmq-uring,rzmq-uring-zc-w2,rzmqzc-uring-nodirect,rzmqzc-uring,rzmqzc-tokio
+python3 scripts/bench_matrix.py --tests tput,pingpong --reps 3 --duration 4 --servers $S \
+  --out results/bench_rzmq_zc.jsonl
+python3 scripts/bench_matrix.py --tests fanout4,slowsub,flood --sizes 100KB,1MB --reps 2 --duration 4 \
+  --servers $S --out results/bench_rzmq_zc.jsonl
+python3 scripts/summarize.py results/bench_rzmq_zc.jsonl
+```
+
+Copy accounting (userspace bytes copied per forwarded byte) uses an `LD_PRELOAD` shim counting
+`memcpy`/`memmove` calls of at least 4 KiB and `realloc` moves; `scripts/copyprobe.sh` wraps it:
+
+```sh
+gcc -O2 -shared -fPIC -o /tmp/libmemcount.so scripts/memcount.c -ldl -lpthread
+MEMCOUNT_SO=/tmp/libmemcount.so scripts/copyprobe.sh "$XZC/rzmq_proxy_zc --mode uring --throttle off" \
+  "--size 1048576 --mode window --window 8 --duration 3"
+```
+
+Which io_uring opcodes a server really submits (e.g. whether `SENDMSG_ZC` is used, and whether the
+kernel reports it copied anyway) comes from the `io_uring:io_uring_submit_req` /
+`io_uring_complete` tracepoints (`scripts/uring_trace.sh`, needs tracefs and root).
+
 ## Files
 
 - `servers/` — the four Rust proxy servers (one CLI). `omq_proxy` exposes `--io-threads`, `--hwm`,
@@ -107,4 +150,8 @@ strace -f -c -p <rzmq_proxy pid>   # while xbench runs
 - `scenarios/` — `conformance.py` (black-box libzmq-semantics suite), `churn_soak.py`,
   `zmtp_raw.py` (raw ZMTP peer for the crash/oversized-frame tests), `zmtp30_publisher.py`.
 - `scripts/` — `bench_matrix.py`, `runone.sh` (RSS/CPU sampling wrapper), `summarize.py`.
-- `results/` — `bench.jsonl` (raw records), `conformance.json`, `agent_notes/`.
+- `rzmq_zc/` — `patches/` (three patches against rzmq 0.5.26), `prepare.sh`, `server/` (builds
+  `rzmq_proxy_zc`).
+- `results/` — `bench.jsonl` (raw records), `conformance.json`, `agent_notes/`; rzmq:
+  `bench_rzmq.jsonl`, `rzmq_sweep.jsonl`, `conformance_rzmq.json`; patched rzmq:
+  `bench_rzmq_zc.jsonl`, `conformance_rzmq_zc.json`, `midframe_churn_rzmq_zc.json`, `copies_1mb.txt`.

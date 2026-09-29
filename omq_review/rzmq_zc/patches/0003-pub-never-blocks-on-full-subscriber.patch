@@ -1,0 +1,199 @@
+rzmq 0.5.26: PUB never blocks on a subscriber whose queue is full.
+
+ZMQ RFC 29 and libzmq: a PUB drops a message for a subscriber at its HWM and keeps
+serving the others; zmq_send never blocks. rzmq's distributor instead awaited the full
+subscriber per SNDTIMEO, and the default SNDTIMEO (-1) meant up to 30 s per message on
+io_uring sessions (unbounded on Tokio sessions): one stalled subscriber stalled the
+publisher and every other subscriber. Now a full subscriber misses the message unless
+SNDTIMEO is explicitly positive, which keeps the wait-then-drop behaviour as an opt-in.
+
+Tests: core/tests/pub_stalled_subscriber.rs (fails on 0.5.26 in both session modes).
+
+diff --git a/core/src/socket/patterns/distributor.rs b/core/src/socket/patterns/distributor.rs
+index d1ce5d1..be23307 100644
+--- a/core/src/socket/patterns/distributor.rs
++++ b/core/src/socket/patterns/distributor.rs
+@@ -128,16 +128,17 @@ impl Distributor {
+   /// subscription (held in `matcher`) is a prefix of the message topic (the first
+   /// frame's data).
+   ///
+-  /// The synchronous `try_send_multipart_owned_sync` is the fast path; the boxed
+-  /// async send only runs for backpressured peers, preserving SNDTIMEO
+-  /// block/timeout semantics. HWM/timeout drops the message for that peer
+-  /// (standard PUB behavior); closed/errored peers are returned by index for
+-  /// removal by the caller.
++  /// The synchronous `try_send_multipart_owned_sync` is the fast path. A peer whose
++  /// queue is full (HWM) misses the message — standard PUB behavior — unless
++  /// `wait_for_full_peer` is set, in which case the boxed async send waits for it per
++  /// SNDTIMEO before dropping. Waiting serializes the fan-out behind that peer, so it
++  /// is opt-in. Closed/errored peers are returned by index for removal by the caller.
+   pub async fn send_matched_multipart(
+     &self,
+     zmtp_frames: FrameBatch,
+     matcher: &SubscriptionMatcher,
+     core_handle: usize,
++    wait_for_full_peer: bool,
+   ) -> Result<(), Vec<(u32, ZmqError)>> {
+     if zmtp_frames.is_empty() {
+       return Ok(());
+@@ -186,6 +187,12 @@ impl Distributor {
+ 
+       match conn.try_send_multipart_owned_sync(batch) {
+         Ok(()) => {}
++        Err((_, ZmqError::ResourceLimitReached)) if !wait_for_full_peer => {
++          tracing::trace!(
++            handle = core_handle, peer_idx = *idx,
++            "PUB (Distributor) dropping message: peer at HWM"
++          );
++        }
+         Err((returned, ZmqError::ResourceLimitReached)) => match conn.send_multipart_owned(returned).await {
+           Ok(()) => {}
+           Err((_, ZmqError::ResourceLimitReached)) | Err((_, ZmqError::Timeout)) => {
+diff --git a/core/src/socket/pub_socket.rs b/core/src/socket/pub_socket.rs
+index 07525e6..d0bd366 100644
+--- a/core/src/socket/pub_socket.rs
++++ b/core/src/socket/pub_socket.rs
+@@ -44,10 +44,20 @@ impl PubSocket {
+ 
+   /// Matches one logical message against the subscription database and fans it
+   /// out to interested peers, cleaning up any peers that errored during send.
++  ///
++  /// Like libzmq (and ZMQ RFC 29), a PUB never blocks on a subscriber whose queue is
++  /// full: that subscriber misses the message and the others are served. The default
++  /// SNDTIMEO (-1) used to make this wait on the full subscriber (up to 30 s on io_uring
++  /// connections), stalling every other subscriber behind the slowest. Waiting is kept as
++  /// an explicit opt-in: a positive SNDTIMEO waits up to that long per full subscriber.
+   async fn dispatch(&self, frames: FrameBatch) -> Result<(), ZmqError> {
++    let wait_for_full_peer = matches!(
++      self.core.core_state.read().options.sndtimeo,
++      Some(timeout) if !timeout.is_zero()
++    );
+     match self
+       .distributor
+-      .send_matched_multipart(frames, &self.matcher, self.core.handle)
++      .send_matched_multipart(frames, &self.matcher, self.core.handle, wait_for_full_peer)
+       .await
+     {
+       Ok(()) => Ok(()),
+diff --git a/core/tests/pub_stalled_subscriber.rs b/core/tests/pub_stalled_subscriber.rs
+new file mode 100644
+index 0000000..38128e1
+--- /dev/null
++++ b/core/tests/pub_stalled_subscriber.rs
+@@ -0,0 +1,116 @@
++//! A PUB never blocks on a subscriber that stopped reading (ZMQ RFC 29, libzmq): once that
++//! subscriber's queue is full it misses messages, and the other subscribers keep receiving.
++//! With the default SNDTIMEO the PUB used to wait on the full subscriber instead (30 s per
++//! message on io_uring sessions), stalling every subscriber behind the slowest one.
++
++mod common;
++
++use rzmq::socket::options::{LAST_ENDPOINT, LINGER, RCVHWM, SNDHWM, SUBSCRIBE};
++use rzmq::{Msg, Socket, SocketType};
++use serial_test::serial;
++use std::sync::atomic::{AtomicU64, Ordering};
++use std::sync::Arc;
++use std::time::{Duration, Instant};
++
++const MESSAGES: u64 = 20_000;
++const SIZE: usize = 1024;
++const SEND_DEADLINE: Duration = Duration::from_secs(15);
++
++async fn endpoint_of(socket: &Socket) -> String {
++  String::from_utf8(socket.get_option(LAST_ENDPOINT).await.unwrap()).unwrap()
++}
++
++async fn set_i32(socket: &Socket, option: i32, value: i32) {
++  socket.set_option_raw(option, &value.to_ne_bytes()).await.unwrap();
++}
++
++async fn run(uring: bool) {
++  #[cfg(not(feature = "io-uring"))]
++  if uring {
++    return;
++  }
++  let ctx = common::test_context();
++  let publ = ctx.socket(SocketType::Pub).unwrap();
++  let fast = ctx.socket(SocketType::Sub).unwrap();
++  let stalled = ctx.socket(SocketType::Sub).unwrap();
++  for s in [&publ, &fast, &stalled] {
++    set_i32(s, LINGER, 0).await;
++    #[cfg(feature = "io-uring")]
++    if uring {
++      set_i32(s, rzmq::socket::options::IO_URING_SESSION_ENABLED, 1).await;
++    }
++  }
++  set_i32(&publ, SNDHWM, 100).await;
++  set_i32(&stalled, RCVHWM, 10).await;
++  publ.bind("tcp://127.0.0.1:0").await.unwrap();
++  let ep = endpoint_of(&publ).await;
++  for s in [&fast, &stalled] {
++    s.set_option_raw(SUBSCRIBE, b"").await.unwrap();
++    s.connect(&ep).await.unwrap();
++  }
++  tokio::time::sleep(Duration::from_millis(500)).await; // subscriptions reach the PUB
++
++  let received = Arc::new(AtomicU64::new(0));
++  let last_seq = Arc::new(AtomicU64::new(0));
++  let reader = tokio::spawn({
++    let fast = fast.clone();
++    let received = received.clone();
++    let last_seq = last_seq.clone();
++    async move {
++      while let Ok(msg) = fast.recv().await {
++        let seq = u64::from_be_bytes(msg.data().unwrap()[..8].try_into().unwrap());
++        received.fetch_add(1, Ordering::Relaxed);
++        last_seq.store(seq, Ordering::Relaxed);
++      }
++    }
++  });
++
++  // `stalled` never reads. The whole send loop must finish without waiting on it.
++  let started = Instant::now();
++  let send_all = async {
++    for seq in 0..MESSAGES {
++      let mut data = vec![0u8; SIZE];
++      data[..8].copy_from_slice(&seq.to_be_bytes());
++      publ.send(Msg::from_vec(data)).await.unwrap();
++      if seq % 256 == 0 {
++        tokio::task::yield_now().await; // let the fast reader keep up
++      }
++    }
++  };
++  tokio::time::timeout(SEND_DEADLINE, send_all)
++    .await
++    .unwrap_or_else(|_| panic!("PUB blocked on the stalled subscriber (uring={uring})"));
++  let send_time = started.elapsed();
++
++  // The fast subscriber got traffic well past the point where the stalled one filled up,
++  // including (after a short drain) messages from the end of the run.
++  let drain_until = Instant::now() + Duration::from_secs(5);
++  while last_seq.load(Ordering::Relaxed) < MESSAGES - 1 && Instant::now() < drain_until {
++    tokio::time::sleep(Duration::from_millis(20)).await;
++  }
++  let got = received.load(Ordering::Relaxed);
++  assert!(
++    last_seq.load(Ordering::Relaxed) >= MESSAGES * 9 / 10,
++    "fast subscriber stalled at seq {} of {MESSAGES} (uring={uring}, received {got}, sends took {send_time:?})",
++    last_seq.load(Ordering::Relaxed)
++  );
++  reader.abort();
++  ctx.term().await.unwrap();
++}
++
++#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
++#[serial]
++async fn pub_does_not_block_on_stalled_subscriber_tokio() {
++  run(false).await;
++}
++
++#[cfg(feature = "io-uring")]
++#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
++#[serial]
++async fn pub_does_not_block_on_stalled_subscriber_uring() {
++  if rzmq::uring::initialize_uring_backend(rzmq::uring::UringConfig::default()).is_err() {
++    eprintln!("io_uring not available, skipping");
++    return;
++  }
++  run(true).await;
++}

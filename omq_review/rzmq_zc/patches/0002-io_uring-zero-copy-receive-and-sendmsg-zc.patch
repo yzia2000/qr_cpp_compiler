@@ -1,0 +1,1559 @@
+rzmq 0.5.26: zero-copy io_uring receive for large frames, and a real SENDMSG_ZC send path.
+
+Receive (IO_URING_RCV_DIRECT_THRESHOLD, default 32 KiB, 0 = off):
+  With multishot receive, every received byte was copied from a provided-buffer ring slot
+  into the engine's accumulator (ZmtpEngine::on_network_bytes -> extend_from_slice), and
+  the accumulator was regrown (realloc/copy) while a large frame built up: ~1.7x the
+  payload in userspace memcpy per received byte at 100 KiB-1 MiB. Once a connection sees a
+  data frame with at least the threshold still to arrive, it retires the multishot op and
+  reads with single-shot IORING_OP_RECV straight into the engine buffer; the rest of a
+  large frame is received with MSG_WAITALL into a buffer sized for the whole frame, which
+  the parser slices into the Msg without copying (libzmq-style). While large messages
+  flow, each next message is read whole into a buffer sized like the last one (one
+  receive per message for same-shaped streams). Bounded: at most 16 MiB
+  is allocated ahead of data actually arriving, so a header announcing 2^44 bytes cannot
+  force a huge allocation. A buffer the kernel may still write into is owned by its op and
+  leaked rather than freed if the op is torn down without its CQE; on close, in-flight
+  receives are detached from the fd (which can be reused at once) and cancelled.
+  Only for framers whose wire bytes are plain ZMTP (NULL, PLAIN); CURVE/Noise unchanged.
+
+Send (IO_URING_SNDZEROCOPY):
+  Data never reached SEND_ZC: the io_uring handler sends every batch with WRITEV, and
+  the existing SEND_ZC path (unused for data) first copies into a registered buffer. Large
+  vectored batches now go out as IORING_OP_SENDMSG_ZC directly from the message Bytes;
+  the payload stays tracked under the same user_data until the IORING_CQE_F_NOTIF
+  notification (so the id is not recycled early). With IORING_SEND_ZC_REPORT_USAGE, a
+  connection whose sends the kernel keeps reporting as copied (loopback, veth, NICs
+  without SG/csum offload) switches back to writev after 64 in a row, as the Linux
+  MSG_ZEROCOPY docs recommend.
+
+Tests: core/tests/io_uring_direct_recv.rs.
+
+diff --git a/core/src/io_uring_backend/connection_handler.rs b/core/src/io_uring_backend/connection_handler.rs
+index 87dc2e8..1c62f18 100644
+--- a/core/src/io_uring_backend/connection_handler.rs
++++ b/core/src/io_uring_backend/connection_handler.rs
+@@ -9,7 +9,7 @@ use std::sync::Arc;
+ 
+ use crate::runtime::MailboxSyncSender;
+ use crate::socket::connection_iface::ISocketConnection;
+-use bytes::Bytes;
++use bytes::{Bytes, BytesMut};
+ 
+ pub use crate::io_uring_backend::ops::UserData;
+ 
+@@ -42,10 +42,26 @@ pub enum HandlerSqeBlueprint {
+     send_op_flags: i32,
+     batch_count: u32,
+   },
++  /// Scatter-gather write issued as one `IORING_OP_SENDMSG_ZC` straight from `bufs`
++  /// (no staging copy): with a NIC that supports it the kernel transmits from these pages
++  /// instead of copying them into socket buffers. The payloads stay pinned by the op until
++  /// its notification CQE. At most `UIO_MAXIOV` buffers.
++  RequestSendVectoredZc { bufs: Vec<Bytes>, batch_count: u32 },
+   /// Request to close the handler's FD. The UringWorker will build a Close SQE.
+   RequestClose,
+   /// Request a multishot ring-buffered read for the handler's FD.
+   RequestNewRingReadMultishot { fd: RawFd, bgid: u16 },
++  /// Single-shot `IORING_OP_RECV` straight into the spare capacity of `buf` (no provided
++  /// buffer, so no copy out of a ring slot). The in-flight op owns `buf` until its CQE,
++  /// then hands it back — with the received bytes appended — through
++  /// `UringConnectionHandler::process_direct_recv`. `len` must not exceed the spare
++  /// capacity. `waitall` sets `MSG_WAITALL` (the kernel keeps receiving until `len`
++  /// bytes arrived, or EOF/error).
++  RequestRecvDirect {
++    buf: BytesMut,
++    len: u32,
++    waitall: bool,
++  },
+   /// Signals intent to cancel an operation.
+   RequestNewAsyncCancel {
+     fd: RawFd,
+@@ -69,7 +85,9 @@ impl HandlerSqeBlueprint {
+   pub fn is_ingress(&self) -> bool {
+     matches!(
+       self,
+-      Self::RequestNewRingReadMultishot { .. } | Self::RequestNewAsyncCancel { .. }
++      Self::RequestNewRingReadMultishot { .. }
++        | Self::RequestNewAsyncCancel { .. }
++        | Self::RequestRecvDirect { .. }
+     )
+   }
+ 
+@@ -78,7 +96,9 @@ impl HandlerSqeBlueprint {
+     match self {
+       Self::RequestSend { data, .. } => Some(data.len()),
+       Self::RequestSendZeroCopy { data_to_send, .. } => Some(data_to_send.len()),
+-      Self::RequestSendRawVectored { bufs, .. } => Some(bufs.iter().map(|b| b.len()).sum()),
++      Self::RequestSendRawVectored { bufs, .. } | Self::RequestSendVectoredZc { bufs, .. } => {
++        Some(bufs.iter().map(|b| b.len()).sum())
++      }
+       Self::RequestSendZeroCopyLeased { len, .. } => Some(*len as usize),
+       _ => None,
+     }
+@@ -192,8 +212,8 @@ pub trait UringConnectionHandler: Send {
+   fn connection_ready(&mut self, interface: &UringWorkerInterface<'_>) -> HandlerIoOps;
+ 
+   /// Called when data is available from a completed ring-buffered read.
+-  /// `bytes` is owned data copied from the kernel ring slot; the slot is already replenished.
+-  /// An empty `Bytes` is the EOF sentinel.
++  /// `bytes` owns the kernel-filled ring slot buffer (taken without a copy); the slot has
++  /// already been replenished. An empty `Bytes` is the EOF sentinel.
+   fn process_ring_read_bytes(
+     &mut self,
+     bytes: Bytes,
+@@ -293,6 +313,26 @@ pub trait UringConnectionHandler: Send {
+     false
+   }
+ 
++  /// Completion of a `RequestRecvDirect`. `buf` is the buffer the handler submitted, its
++  /// length extended by the bytes received when `cqe_result > 0`. `cqe_result` is the raw
++  /// CQE result: bytes received, 0 for EOF, or `-errno` (`-ECANCELED` when the worker
++  /// cancelled it). `waitall` echoes the request.
++  fn process_direct_recv(
++    &mut self,
++    _buf: BytesMut,
++    _cqe_result: i32,
++    _waitall: bool,
++    _interface: &UringWorkerInterface<'_>,
++  ) -> HandlerIoOps {
++    HandlerIoOps::new()
++  }
++
++  /// Notification of a zero-copy send (`RequestSendVectoredZc`) of this connection:
++  /// `copied` is true when the kernel reported it had to copy the data after all
++  /// (`IORING_NOTIF_USAGE_ZC_COPIED`, e.g. loopback or a NIC without scatter-gather), in
++  /// which case zero-copy only adds page pinning and notification overhead.
++  fn on_zerocopy_notification(&mut self, _copied: bool) {}
++
+   /// Called by the worker when `AttachIngressSender` is received from SocketCore.
+   /// The handler stores the sender and uses it to deliver inbound messages directly
+   /// to the socket's `ReadyPipeQueue`, bypassing any intermediate Tokio task.
+diff --git a/core/src/io_uring_backend/worker/cqe_processor.rs b/core/src/io_uring_backend/worker/cqe_processor.rs
+index bfae4ab..5677533 100644
+--- a/core/src/io_uring_backend/worker/cqe_processor.rs
++++ b/core/src/io_uring_backend/worker/cqe_processor.rs
+@@ -1,7 +1,8 @@
+ #![cfg(feature = "io-uring")]
+ 
+ use super::internal_op_tracker::{
+-  InternalOpDetails, InternalOpPayload, InternalOpType, PinnedEgressBatch,
++  DirectRecvTarget, InternalOpDetails, InternalOpPayload, InternalOpType, PinnedEgressBatch,
++  ZcEgressBatch,
+ };
+ use crate::io_uring_backend::connection_handler::{
+   HandlerIoOps, HandlerSqeBlueprint, UringWorkerInterface,
+@@ -21,6 +22,10 @@ use tracing::{debug, error, info, trace, warn};
+ 
+ #[cfg(feature = "io-uring")]
+ const CQE_F_NOTIFY_FLAG: u32 = 1 << 3; // (8) for kernels 6.0+
++/// `IORING_SEND_ZC_REPORT_USAGE` (SQE ioprio): the notification CQE reports whether the
++/// kernel had to copy after all (`IORING_NOTIF_USAGE_ZC_COPIED`), e.g. over loopback.
++const IORING_SEND_ZC_REPORT_USAGE: u16 = 1 << 3;
++const IORING_NOTIF_USAGE_ZC_COPIED: u32 = 1 << 31;
+ 
+ /// Submit a single blueprint SQE for `fd`. Returns `Err(blueprint)` if the submission
+ /// queue is full (race after caller's pre-check) so the caller can push it back to the front
+@@ -331,6 +336,52 @@ pub(crate) fn process_handler_blueprint(
+       Ok(())
+     }
+ 
++    HandlerSqeBlueprint::RequestSendVectoredZc { bufs, batch_count } => {
++      metric_record_write_batch!(worker.metrics, batch_count as u64);
++      let batch = ZcEgressBatch::new(bufs);
++      let msg_ptr = batch.msghdr_ptr();
++      let user_data = internal_ops.new_op_id(
++        fd,
++        InternalOpType::SendVectoredZc,
++        InternalOpPayload::VectoredZc(batch),
++      );
++      // MSG_WAITALL: the kernel retries short sends itself, so the first CQE covers the
++      // whole batch unless the connection fails.
++      let entry = opcode::SendMsgZc::new(types::Fd(fd), msg_ptr)
++        .flags((libc::MSG_WAITALL | libc::MSG_NOSIGNAL) as u32)
++        .ioprio(IORING_SEND_ZC_REPORT_USAGE)
++        .build()
++        .user_data(user_data);
++
++      unsafe {
++        if sq.push(&entry).is_err() {
++          debug!(
++            "CQE Processor: SQ push failed for FD {} RequestSendVectoredZc (race). Re-queueing.",
++            fd
++          );
++          if let Some(InternalOpDetails {
++            payload: InternalOpPayload::VectoredZc(batch),
++            ..
++          }) = internal_ops.take_op_details(user_data)
++          {
++            return Err(HandlerSqeBlueprint::RequestSendVectoredZc {
++              bufs: batch.payloads,
++              batch_count,
++            });
++          }
++          unreachable!("VectoredZc payload expected after RequestSendVectoredZc registration");
++        } else {
++          counter!(worker.metrics, sqe_op_write, inc);
++          trace!(
++            "CQE Processor: Queued SendMsgZc SQE (ud:{}) for FD {}.",
++            user_data,
++            fd
++          );
++        }
++      }
++      Ok(())
++    }
++
+     HandlerSqeBlueprint::RequestSendZeroCopyLeased { id, ptr, len } => {
+       let op_payload = InternalOpPayload::SendZeroCopyLeased { send_buf_id: id };
+       let mut entry = opcode::SendZc::new(types::Fd(fd), ptr, len)
+@@ -434,6 +485,52 @@ pub(crate) fn process_handler_blueprint(
+       Ok(())
+     }
+ 
++    HandlerSqeBlueprint::RequestRecvDirect { buf, len, waitall } => {
++      let mut target = DirectRecvTarget::new(buf, len as usize, waitall);
++      let window = target.window_ptr();
++      let msg_flags = if waitall { libc::MSG_WAITALL } else { 0 };
++      let user_data = internal_ops.new_op_id(
++        fd,
++        InternalOpType::DirectRecv,
++        InternalOpPayload::DirectRecv(target),
++      );
++      let entry = opcode::Recv::new(types::Fd(fd), window, len)
++        .flags(msg_flags)
++        .build()
++        .user_data(user_data);
++
++      unsafe {
++        if sq.push(&entry).is_err() {
++          debug!(
++            "CQE Processor: SQ push failed for FD {} RequestRecvDirect (race). Re-queueing.",
++            fd
++          );
++          if let Some(InternalOpDetails {
++            payload: InternalOpPayload::DirectRecv(target),
++            ..
++          }) = internal_ops.take_op_details(user_data)
++          {
++            return Err(HandlerSqeBlueprint::RequestRecvDirect {
++              buf: target.into_unsubmitted(),
++              len,
++              waitall,
++            });
++          }
++          unreachable!("DirectRecv payload expected after RequestRecvDirect registration");
++        } else {
++          counter!(worker.metrics, sqe_op_read, inc);
++          trace!(
++            "CQE Processor: Queued direct Recv SQE (ud:{}, len:{}, waitall:{}) for FD {}.",
++            user_data,
++            len,
++            waitall,
++            fd
++          );
++        }
++      }
++      Ok(())
++    }
++
+     HandlerSqeBlueprint::RequestNewAsyncCancel {
+       fd: bp_fd,
+       target_user_data,
+@@ -671,6 +768,15 @@ pub(crate) fn process_all_cqes(
+       continue;
+     }
+ 
++    if worker
++      .internal_op_tracker
++      .get_op_details(cqe_user_data)
++      .map_or(false, |d| d.op_type == InternalOpType::SendVectoredZc)
++    {
++      process_vectored_zc_cqe(worker, cqe_user_data, cqe_result, cqe_flags, &mut new_work_generated);
++      continue;
++    }
++
+     let mut op_details_taken_for_final_processing: Option<InternalOpDetails> = None;
+     let mut is_multishot_read_pending_more = false;
+     let mut was_delegated_to_multishot_handler = false;
+@@ -912,6 +1018,31 @@ pub(crate) fn process_all_cqes(
+             if let Some(mut h) = worker.handler_manager.remove_handler(handler_fd) {
+               h.fd_has_been_closed();
+             }
++            // A direct RECV or zero-copy send still in flight keeps using its buffer after
++            // the close, and an op still waiting for its first CQE is not completed by the
++            // close (it holds its own file reference). Detach them from the fd, which can be
++            // reused right away, and cancel those still pending; their final CQE releases
++            // the buffer.
++            for target_ud in worker.internal_op_tracker.orphan_inflight_buffer_ops(handler_fd) {
++              let cancel_ud = worker.internal_op_tracker.new_op_id(
++                -1,
++                InternalOpType::AsyncCancel,
++                InternalOpPayload::CancelTarget {
++                  target_user_data: target_ud,
++                },
++              );
++              let cancel = opcode::AsyncCancel::new(target_ud)
++                .build()
++                .user_data(cancel_ud);
++              if unsafe { worker.ring.submission_shared().push(&cancel) }.is_err() {
++                worker.internal_op_tracker.take_op_details(cancel_ud);
++                warn!(
++                  fd = handler_fd,
++                  ud = target_ud,
++                  "CloseFd: SQ full, in-flight buffer op of the closed fd not cancelled; it completes on the peer's next data or EOF."
++                );
++              }
++            }
+             // Drop all queued write blueprints and in-flight send buffer allocations
+             // for this fd so they are freed immediately rather than leaking.
+             worker.work_map.remove(&handler_fd);
+@@ -1359,6 +1490,45 @@ pub(crate) fn process_all_cqes(
+             }
+           }
+         }
++        InternalOpType::DirectRecv => {
++          let InternalOpPayload::DirectRecv(target) = op_details.payload else {
++            unreachable!("DirectRecv op without DirectRecv payload");
++          };
++          let waitall = target.waitall;
++          let buf = target.complete(cqe_result);
++          if let Some(handler) = worker.handler_manager.get_mut(handler_fd) {
++            let pending_egress = worker
++              .work_map
++              .get(&handler_fd)
++              .map_or(0, |w| w.egress_blueprints.len());
++            let io_config = handler.io_config().clone();
++            let interface = UringWorkerInterface::new(
++              handler_fd,
++              &io_config,
++              worker.buffer_manager.as_ref(),
++              worker.default_buffer_ring_group_id_val,
++              cqe_user_data,
++              pending_egress,
++              false,
++              worker.cfg_egress_cap,
++            );
++            let handler_output = handler.process_direct_recv(buf, cqe_result, waitall, &interface);
++            if !handler_output.sqe_blueprints.is_empty() {
++              new_work_generated.push((handler_fd, handler_output.sqe_blueprints));
++            }
++            if handler_output.initiate_close_due_to_error {
++              worker
++                .fds_needing_close_initiated_pass
++                .push_back(handler_fd);
++            }
++          }
++        }
++        InternalOpType::DirectRecvOrphan => {
++          // Its connection is gone; the kernel has released the buffer, free it now.
++          if let InternalOpPayload::DirectRecv(target) = op_details.payload {
++            drop(target.complete(cqe_result));
++          }
++        }
+         InternalOpType::RingReadMultishot => {
+           // This arm is only reached when a multishot read CQE was NOT delegated to its
+           // registered handler — indicating state-tracking desynchronisation.
+@@ -1378,3 +1548,122 @@ pub(crate) fn process_all_cqes(
+ 
+   Ok((num_processed, new_work_generated))
+ }
++
++/// CQEs of a `SendVectoredZc` op (`IORING_OP_SENDMSG_ZC`). The first CQE reports the send
++/// (and carries `IORING_CQE_F_MORE` when a notification follows); the notification CQE
++/// (`IORING_CQE_F_NOTIF`) says the kernel no longer references the payload pages. The op
++/// stays in the tracker under its `UserData` until then, so the id cannot be recycled while
++/// the kernel still owes a CQE for it.
++fn process_vectored_zc_cqe(
++  worker: &mut UringWorker,
++  cqe_user_data: UserData,
++  cqe_result: i32,
++  cqe_flags: u32,
++  new_work_generated: &mut Vec<(RawFd, Vec<HandlerSqeBlueprint>)>,
++) {
++  if (cqe_flags & CQE_F_NOTIFY_FLAG) != 0 {
++    let copied = (cqe_result as u32) & IORING_NOTIF_USAGE_ZC_COPIED != 0;
++    if let Some(details) = worker.internal_op_tracker.take_op_details(cqe_user_data) {
++      if details.fd >= 0 {
++        if let Some(handler) = worker.handler_manager.get_mut(details.fd) {
++          handler.on_zerocopy_notification(copied);
++        }
++      }
++    }
++    return;
++  }
++
++  let notification_follows = (cqe_flags & IOURING_CQE_F_MORE) != 0;
++  let (handler_fd, total_len, remainder) = {
++    let Some(details) = worker.internal_op_tracker.get_op_details_mut(cqe_user_data) else {
++      return;
++    };
++    let InternalOpPayload::VectoredZc(batch) = &mut details.payload else {
++      unreachable!("SendVectoredZc op without VectoredZc payload");
++    };
++    batch.sent = true;
++    let written = cqe_result.max(0) as usize;
++    let remainder = if written < batch.total_len {
++      batch.remainder_after(written)
++    } else {
++      Vec::new()
++    };
++    (details.fd, batch.total_len, remainder)
++  };
++  if !notification_follows {
++    worker.internal_op_tracker.take_op_details(cqe_user_data);
++  }
++  if handler_fd < 0 {
++    return; // connection already closed
++  }
++
++  if cqe_result < 0 {
++    let errno = -cqe_result;
++    if errno == libc::EAGAIN || errno == libc::EWOULDBLOCK || errno == libc::ENOBUFS {
++      // Retry as a regular writev; the write gate stays held until that completes.
++      counter!(worker.metrics, eagain_errors, inc);
++      worker
++        .work_map
++        .entry(handler_fd)
++        .or_default()
++        .egress_blueprints
++        .push_front(HandlerSqeBlueprint::RequestSendRawVectored {
++          bufs: remainder,
++          send_op_flags: 0,
++          batch_count: 0,
++        });
++      return;
++    }
++    let zmq_err = ZmqError::from(std::io::Error::from_raw_os_error(errno));
++    error!(fd = handler_fd, error = %zmq_err, "Fatal error during SENDMSG_ZC. Closing connection.");
++    worker.fds_needing_close_initiated_pass.push_back(handler_fd);
++    return;
++  }
++
++  if (cqe_result as usize) < total_len {
++    trace!(
++      fd = handler_fd,
++      written = cqe_result,
++      total_len,
++      "SENDMSG_ZC partial: re-queuing remainder as writev."
++    );
++    worker
++      .work_map
++      .entry(handler_fd)
++      .or_default()
++      .egress_blueprints
++      .push_front(HandlerSqeBlueprint::RequestSendRawVectored {
++        bufs: remainder,
++        send_op_flags: 0,
++        batch_count: 0,
++      });
++    return;
++  }
++
++  // Complete: release the handler's write gate exactly like a finished writev.
++  if let Some(handler) = worker.handler_manager.get_mut(handler_fd) {
++    let pending_egress = worker
++      .work_map
++      .get(&handler_fd)
++      .map_or(0, |w| w.egress_blueprints.len());
++    let io_config = handler.io_config().clone();
++    let interface = UringWorkerInterface::new(
++      handler_fd,
++      &io_config,
++      worker.buffer_manager.as_ref(),
++      worker.default_buffer_ring_group_id_val,
++      cqe_user_data,
++      pending_egress,
++      true,
++      worker.cfg_egress_cap,
++    );
++    let handler_output =
++      handler.handle_internal_sqe_completion(cqe_user_data, cqe_result, cqe_flags, &interface);
++    if !handler_output.sqe_blueprints.is_empty() {
++      new_work_generated.push((handler_fd, handler_output.sqe_blueprints));
++    }
++    if handler_output.initiate_close_due_to_error {
++      worker.fds_needing_close_initiated_pass.push_back(handler_fd);
++    }
++  }
++}
+diff --git a/core/src/io_uring_backend/worker/internal_op_tracker.rs b/core/src/io_uring_backend/worker/internal_op_tracker.rs
+index 9b24c47..e59dec3 100644
+--- a/core/src/io_uring_backend/worker/internal_op_tracker.rs
++++ b/core/src/io_uring_backend/worker/internal_op_tracker.rs
+@@ -2,7 +2,7 @@
+ 
+ use crate::io_uring_backend::ops::UserData;
+ use crate::io_uring_backend::send_buffer_pool::RegisteredSendBufferId;
+-use bytes::Bytes;
++use bytes::{Bytes, BytesMut};
+ use std::collections::HashMap;
+ use std::os::unix::io::RawFd;
+ 
+@@ -34,6 +34,151 @@ impl std::fmt::Debug for PinnedEgressBatch {
+   }
+ }
+ 
++/// Payload of a `SendVectoredZc` op (`IORING_OP_SENDMSG_ZC`). The kernel reads the
++/// payload pages until the op's notification CQE (`IORING_CQE_F_NOTIF`), which can come
++/// well after the send's own completion, so everything the `msghdr` points to lives here
++/// until then. `msghdr` and `iovecs` are boxed so their addresses stay fixed while this
++/// struct moves.
++pub(crate) struct ZcEgressBatch {
++  pub msghdr: Box<libc::msghdr>,
++  pub iovecs: Box<[libc::iovec]>,
++  pub payloads: Vec<Bytes>,
++  pub total_len: usize,
++  /// The send's own CQE was processed; only the notification is outstanding.
++  pub sent: bool,
++}
++
++impl ZcEgressBatch {
++  pub fn new(payloads: Vec<Bytes>) -> Self {
++    let total_len = payloads.iter().map(|b| b.len()).sum();
++    let mut iovecs: Box<[libc::iovec]> = payloads
++      .iter()
++      .map(|b| libc::iovec {
++        iov_base: b.as_ptr() as *mut libc::c_void,
++        iov_len: b.len(),
++      })
++      .collect::<Vec<_>>()
++      .into_boxed_slice();
++    // SAFETY: an all-zero msghdr is valid (no name, no control data).
++    let mut msghdr: Box<libc::msghdr> = Box::new(unsafe { std::mem::zeroed() });
++    msghdr.msg_iov = iovecs.as_mut_ptr();
++    msghdr.msg_iovlen = iovecs.len() as _;
++    Self {
++      msghdr,
++      iovecs,
++      payloads,
++      total_len,
++      sent: false,
++    }
++  }
++
++  pub fn msghdr_ptr(&self) -> *const libc::msghdr {
++    &*self.msghdr
++  }
++
++  /// The bytes after the first `written`, as zero-copy slices of the payloads.
++  pub fn remainder_after(&self, written: usize) -> Vec<Bytes> {
++    let mut skip = written;
++    let mut rest = Vec::new();
++    for payload in &self.payloads {
++      if skip >= payload.len() {
++        skip -= payload.len();
++      } else {
++        rest.push(payload.slice(skip..));
++        skip = 0;
++      }
++    }
++    rest
++  }
++}
++
++// SAFETY: the raw pointers in `msghdr`/`iovecs` point into `iovecs`/`payloads`, owned here.
++// Only the worker thread touches the batch between submission and the notification.
++unsafe impl Send for ZcEgressBatch {}
++
++impl std::fmt::Debug for ZcEgressBatch {
++  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
++    f.debug_struct("ZcEgressBatch")
++      .field("iovec_count", &self.iovecs.len())
++      .field("total_len", &self.total_len)
++      .field("sent", &self.sent)
++      .finish()
++  }
++}
++
++/// Receive target of an in-flight `DirectRecv` op: the kernel writes into the spare
++/// capacity of `buf` until the op's CQE arrives, so the allocation must outlive the op.
++/// It is handed back only through [`complete`](Self::complete) (called for the op's CQE)
++/// or [`into_unsubmitted`](Self::into_unsubmitted) (the SQE never reached the kernel).
++/// Dropping it any other way — e.g. the worker tearing down with the op still in flight —
++/// leaks the allocation rather than freeing memory the kernel may still write to.
++pub(crate) struct DirectRecvTarget {
++  buf: Option<BytesMut>,
++  base_len: usize,
++  len: usize,
++  pub waitall: bool,
++}
++
++impl DirectRecvTarget {
++  /// `len` bytes of `buf`'s spare capacity become the kernel's receive window.
++  pub fn new(buf: BytesMut, len: usize, waitall: bool) -> Self {
++    assert!(
++      buf.capacity() - buf.len() >= len,
++      "direct recv window exceeds spare capacity"
++    );
++    let base_len = buf.len();
++    Self {
++      buf: Some(buf),
++      base_len,
++      len,
++      waitall,
++    }
++  }
++
++  /// Start of the receive window (the first byte past the buffered data). The heap
++  /// allocation does not move when this struct moves.
++  pub fn window_ptr(&mut self) -> *mut u8 {
++    let buf = self.buf.as_mut().expect("direct recv buffer present");
++    buf.spare_capacity_mut().as_mut_ptr() as *mut u8
++  }
++
++  /// The op's CQE arrived, so the kernel no longer references the buffer. A positive
++  /// `cqe_result` is the number of bytes the kernel wrote into the window.
++  pub fn complete(mut self, cqe_result: i32) -> BytesMut {
++    let mut buf = self.buf.take().expect("direct recv buffer present");
++    if cqe_result > 0 {
++      let received = (cqe_result as usize).min(self.len);
++      // SAFETY: the kernel initialized `received` bytes of the window, which starts at
++      // `base_len` and lies within the capacity (checked in `new`).
++      unsafe { buf.set_len(self.base_len + received) };
++    }
++    buf
++  }
++
++  /// The SQE was never submitted: the kernel never saw the buffer.
++  pub fn into_unsubmitted(mut self) -> BytesMut {
++    self.buf.take().expect("direct recv buffer present")
++  }
++}
++
++impl Drop for DirectRecvTarget {
++  fn drop(&mut self) {
++    if let Some(buf) = self.buf.take() {
++      std::mem::forget(buf);
++    }
++  }
++}
++
++impl std::fmt::Debug for DirectRecvTarget {
++  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
++    f.debug_struct("DirectRecvTarget")
++      .field("base_len", &self.base_len)
++      .field("len", &self.len)
++      .field("waitall", &self.waitall)
++      .finish()
++  }
++}
++
+ #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+ pub(crate) enum InternalOpType {
+   Accept,
+@@ -49,6 +194,15 @@ pub(crate) enum InternalOpType {
+   SendRawVectored,
+   /// `SEND_ZC` from a pre-registered, pre-written buffer slot (Phase 3 zero-copy lease path).
+   SendZeroCopyLeased,
++  /// Single-shot `RECV` into a handler buffer (`InternalOpPayload::DirectRecv`).
++  DirectRecv,
++  /// A `DirectRecv` whose connection was closed while it was in flight. It is detached
++  /// from its fd (which may be reused) and only waits for its CQE to free the buffer.
++  DirectRecvOrphan,
++  /// `IORING_OP_SENDMSG_ZC` of a vectored batch (`InternalOpPayload::VectoredZc`). Stays
++  /// tracked under the same `UserData` until its notification CQE. `fd == -1` once its
++  /// connection was closed: then its CQEs only release the payload.
++  SendVectoredZc,
+ }
+ 
+ /// Payload associated with an internal operation, e.g., buffer for send.
+@@ -77,6 +231,10 @@ pub(crate) enum InternalOpPayload {
+   SendZeroCopyLeased {
+     send_buf_id: RegisteredSendBufferId,
+   },
++  /// Buffer the kernel receives into for a `DirectRecv` op.
++  DirectRecv(DirectRecvTarget),
++  /// Pinned batch of a `SendVectoredZc` op.
++  VectoredZc(ZcEgressBatch),
+ }
+ 
+ impl Default for InternalOpPayload {
+@@ -141,6 +299,18 @@ impl InternalOpTracker {
+     }
+   }
+ 
++  pub fn get_op_details_mut(&mut self, user_data: UserData) -> Option<&mut InternalOpDetails> {
++    if user_data < INTERNAL_OP_BASE {
++      return None;
++    }
++    let key = (user_data - INTERNAL_OP_BASE) as usize;
++    if self.op_to_details.contains(key) {
++      self.op_to_details.get_mut(key)
++    } else {
++      self.pending_notifications.get_mut(&user_data)
++    }
++  }
++
+   #[allow(dead_code)]
+   pub fn get_op_details(&self, user_data: UserData) -> Option<&InternalOpDetails> {
+     if user_data < INTERNAL_OP_BASE {
+@@ -229,8 +399,39 @@ impl InternalOpTracker {
+       d.fd == fd_to_check
+         && matches!(
+           d.op_type,
+-          InternalOpType::RingRead | InternalOpType::RingReadMultishot
++          InternalOpType::RingRead | InternalOpType::RingReadMultishot | InternalOpType::DirectRecv
+         )
+     })
+   }
++
++  /// Detaches from `fd` the in-flight ops whose buffers the kernel may still use after
++  /// the fd is closed — `DirectRecv` (the kernel writes into its buffer) and
++  /// `SendVectoredZc` (the kernel reads the payload pages until the notification) — and
++  /// returns the `UserData` of those still waiting for their first CQE, which the caller
++  /// must cancel: closing the fd does not complete them, as each op holds its own file
++  /// reference. They stay tracked, keeping their slab key and so their `UserData` reserved,
++  /// until their final CQE releases the buffer. `fd` may be reused right away.
++  pub(crate) fn orphan_inflight_buffer_ops(&mut self, fd: RawFd) -> Vec<UserData> {
++    let mut to_cancel = Vec::new();
++    for (key, details) in self.op_to_details.iter_mut() {
++      if details.fd != fd {
++        continue;
++      }
++      match (&details.op_type, &details.payload) {
++        (InternalOpType::DirectRecv, _) => {
++          details.op_type = InternalOpType::DirectRecvOrphan;
++          details.fd = -1;
++          to_cancel.push(key as u64 + INTERNAL_OP_BASE);
++        }
++        (InternalOpType::SendVectoredZc, InternalOpPayload::VectoredZc(batch)) => {
++          details.fd = -1;
++          if !batch.sent {
++            to_cancel.push(key as u64 + INTERNAL_OP_BASE);
++          }
++        }
++        _ => {}
++      }
++    }
++    to_cancel
++  }
+ }
+diff --git a/core/src/io_uring_backend/zmtp_handler.rs b/core/src/io_uring_backend/zmtp_handler.rs
+index 1b60583..8c7aeea 100644
+--- a/core/src/io_uring_backend/zmtp_handler.rs
++++ b/core/src/io_uring_backend/zmtp_handler.rs
+@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
+ use std::time::{Duration, Instant};
+ 
+ use async_trait::async_trait;
+-use bytes::Bytes;
++use bytes::{Bytes, BytesMut};
+ use tracing::{debug, error, info, trace, warn};
+ 
+ use crate::ZmqError;
+@@ -31,6 +31,18 @@ use crate::socket::connection_iface::ISocketConnection;
+ use crate::socket::patterns::ready_pipe_queue::PipeMessageSender;
+ 
+ 
++/// Direct-mode read window when no large frame body is pending.
++const DIRECT_RECV_CHUNK: usize = 64 * 1024;
++/// Smallest leftover spare capacity worth receiving into instead of allocating a new buffer.
++const DIRECT_RECV_MIN_WINDOW: usize = 16 * 1024;
++/// Upper bound on what one direct receive allocates ahead of the bytes actually arriving,
++/// so a frame header announcing a huge body cannot force a huge allocation. Longer frames
++/// grow their buffer as data arrives, at most doubling per receive.
++const DIRECT_RECV_MAX_PREALLOC: usize = 16 * 1024 * 1024;
++/// Consecutive zero-copy sends the kernel reports as copied after which a connection
++/// goes back to `writev` for good (the Linux MSG_ZEROCOPY guidance for this signal).
++const ZC_COPIED_FALLBACK_AFTER: u32 = 64;
++
+ pub(crate) struct ZmtpSmartConnection {
+   fd: RawFd,
+   egress_tx: fibre::mpsc::BoundedAsyncSender<FrameBatch>,
+@@ -218,6 +230,31 @@ pub(crate) struct ZmtpUringHandler {
+   close_deadline: Option<Instant>,
+   use_send_zerocopy: bool,
+   use_recv_multishot: bool,
++  /// A `MultishotReader` owns this connection's reads (set in `connection_ready`). Direct
++  /// mode requires it: the worker then issues no reads of its own for the fd.
++  has_multishot_reader: bool,
++  /// Missing-body size that switches this connection to direct receive (0 = never).
++  direct_threshold: usize,
++  /// Direct receive (libzmq-style zero-copy ingress). Once a data frame is seen with at
++  /// least `direct_threshold` body bytes still to arrive, the multishot ring read is
++  /// retired for good: every read becomes a single-shot `RECV` into the engine's own
++  /// buffer, and the rest of a large frame is received with `MSG_WAITALL` straight into a
++  /// buffer sized for the whole frame, from which the parser slices the `Msg` without
++  /// copying. The provided-buffer path instead copies every byte from a ring slot into the
++  /// engine buffer, and regrows that buffer while a large frame accumulates.
++  direct_mode: bool,
++  /// A `RequestRecvDirect` is queued or in the kernel; the engine buffer is detached into it.
++  direct_recv_in_flight: bool,
++  /// Zero-copy sends in a row that the kernel reported as copied; reaching
++  /// `ZC_COPIED_FALLBACK_AFTER` turns zero-copy send off for this connection.
++  zc_copied_streak: u32,
++  /// Wire length (all frames, headers included) of the last message delivered in direct
++  /// mode. While it is at least `direct_threshold`, the next message is assumed to be
++  /// shaped alike and is read whole into one buffer sized for it: a single receive per
++  /// message when the bytes are already there, and no part of a large body lands in a
++  /// small buffer it would have to be copied out of. A wrong guess costs at most one
++  /// bounded copy of a partial frame.
++  direct_predicted_len: usize,
+   send_buffer_slot_size: usize,
+   /// Reusable scratch space for coalescing egress batches — avoids per-cycle heap allocation.
+   coalesce_scratch: Vec<FrameBatch>,
+@@ -257,6 +294,7 @@ impl ZmtpUringHandler {
+     worker_asleep: Arc<AtomicU8>,
+   ) -> Self {
+     let sndbatch_count = engine.config().sndbatch_count;
++    let direct_threshold = engine.config().rcv_direct_threshold;
+     Self {
+       fd,
+       worker_io_config,
+@@ -272,6 +310,12 @@ impl ZmtpUringHandler {
+       close_deadline: None,
+       use_send_zerocopy,
+       use_recv_multishot,
++      has_multishot_reader: false,
++      direct_threshold,
++      direct_mode: false,
++      direct_recv_in_flight: false,
++      direct_predicted_len: 0,
++      zc_copied_streak: 0,
+       send_buffer_slot_size,
+       coalesce_scratch: Vec::with_capacity(sndbatch_count),
+       write_in_flight: 0,
+@@ -303,10 +347,11 @@ impl ZmtpUringHandler {
+   fn observe_read_stall(&mut self) {
+     #[cfg(feature = "diagnostics")]
+     {
+-      let reading = self
+-        .multishot_reader
+-        .as_ref()
+-        .map_or(true, |r| r.is_reading());
++      let reading = self.direct_recv_in_flight
++        || self
++          .multishot_reader
++          .as_ref()
++          .map_or(true, |r| r.is_reading());
+       if reading
+         || self.is_closing
+         || self.engine.config().socket_type_name.as_str() == "PUSH"
+@@ -413,6 +458,13 @@ impl ZmtpUringHandler {
+           {
+             self.ingress_emitted += 1;
+           }
++          if self.direct_mode {
++            // ZMTP frame header: 2 bytes up to 255 body bytes, 9 above.
++            self.direct_predicted_len = batch
++              .iter()
++              .map(|m| m.size() + if m.size() <= 255 { 2 } else { 9 })
++              .sum();
++          }
+           if let Some(ref sender) = self.ingress_sender {
+             // FIFO Guard: if we already have stashed batches, we must append to spillover
+             // first to preserve strict FIFO delivery order.
+@@ -486,6 +538,72 @@ impl ZmtpUringHandler {
+     }
+   }
+ 
++  /// Switches to direct receive once a large frame body is pending (see `direct_mode`).
++  /// Called after multishot data was decoded; `prepare_direct_recv` then retires the
++  /// multishot op and takes over reading.
++  fn maybe_enter_direct_mode(&mut self) {
++    if self.direct_mode || self.direct_threshold == 0 || !self.has_multishot_reader || self.is_closing {
++      return;
++    }
++    if self
++      .engine
++      .pending_frame_missing()
++      .map_or(false, |missing| missing >= self.direct_threshold)
++    {
++      debug!(
++        fd = self.fd,
++        "ZmtpUringHandler: large frame pending — switching to direct receive"
++      );
++      self.direct_mode = true;
++    }
++  }
++
++  /// The next direct-mode read (see `direct_mode`), or the cancellation of the multishot
++  /// op that must be fully retired before it: both would append to the same buffer.
++  fn prepare_direct_recv(&mut self) -> Option<HandlerSqeBlueprint> {
++    if self.direct_recv_in_flight || self.engine.phase != ZmtpPhase::Data {
++      return None;
++    }
++    if let Some(reader) = self.multishot_reader.as_mut() {
++      if reader.is_reading() {
++        return reader.prepare_cancel_intent();
++      }
++      if !reader.is_idle() {
++        return None;
++      }
++    }
++
++    // (min spare capacity, allocation if short, exact read length, MSG_WAITALL)
++    let (min_spare, alloc, exact_len, waitall) = match self.engine.pending_frame_missing() {
++      // The rest of a large frame: straight into a buffer sized for the whole frame.
++      Some(missing) if missing >= self.direct_threshold => {
++        let window = missing
++          .min(DIRECT_RECV_MAX_PREALLOC.max(self.engine.buffered_len()))
++          .min(u32::MAX as usize);
++        (window, window, Some(window), true)
++      }
++      // Large messages are flowing: read the next one whole, assuming it is shaped like
++      // the last (see `direct_predicted_len`).
++      _ if self.direct_predicted_len >= self.direct_threshold => {
++        let want = self
++          .direct_predicted_len
++          .min(DIRECT_RECV_MAX_PREALLOC)
++          .saturating_sub(self.engine.buffered_len())
++          .max(1);
++        (want, want, Some(want), false)
++      }
++      _ => (DIRECT_RECV_MIN_WINDOW, DIRECT_RECV_CHUNK, None, false),
++    };
++    let buf = self.engine.take_recv_target(min_spare, alloc);
++    let len = exact_len.unwrap_or_else(|| (buf.capacity() - buf.len()).min(u32::MAX as usize));
++    self.direct_recv_in_flight = true;
++    Some(HandlerSqeBlueprint::RequestRecvDirect {
++      buf,
++      len: len as u32,
++      waitall,
++    })
++  }
++
+   /// Edge-triggered ingress-congestion monitor notification. Routed as a command
+   /// to SocketCore (which owns the monitor channel), mirroring the tokio session
+   /// path's `ConnectionCongested`/`ConnectionUncongested` events. The latch makes
+@@ -577,6 +695,7 @@ impl UringConnectionHandler for ZmtpUringHandler {
+     if self.use_recv_multishot {
+       if let Some(bgid) = interface.default_buffer_group_id() {
+         self.multishot_reader = Some(MultishotReader::new(self.fd, bgid));
++        self.has_multishot_reader = true;
+       } else {
+         warn!(
+           fd = self.fd,
+@@ -633,7 +752,9 @@ impl UringConnectionHandler for ZmtpUringHandler {
+     }
+ 
+     let out = self.engine.on_network_bytes(bytes);
+-    self.apply_engine_output(out)
++    let ops = self.apply_engine_output(out);
++    self.maybe_enter_direct_mode();
++    ops
+   }
+ 
+   fn handle_internal_sqe_completion(
+@@ -694,9 +815,13 @@ impl UringConnectionHandler for ZmtpUringHandler {
+ 
+     let mut ops = HandlerIoOps::new();
+ 
+-    // (a) Re-arm multishot read.
++    // (a) Re-arm reads: the next direct receive, or the multishot ring read.
+     if !self.is_closing && !self.should_throttle_reads() {
+-      if let Some(reader) = &mut self.multishot_reader {
++      if self.direct_mode {
++        if let Some(blueprint) = self.prepare_direct_recv() {
++          ops.sqe_blueprints.push(blueprint);
++        }
++      } else if let Some(reader) = &mut self.multishot_reader {
+         if let Some(blueprint) = reader.prepare_recv_multi_intent() {
+           ops.sqe_blueprints.push(blueprint);
+         }
+@@ -742,16 +867,27 @@ impl UringConnectionHandler for ZmtpUringHandler {
+         self.write_in_flight += 1; // Lock the pipeline gate for vectored writes
+         let batch_count = drained as u32;
+ 
+-        // Generate one highly-coalesced scatter-gather writev SQE
++        // Generate one highly-coalesced scatter-gather write SQE: SENDMSG_ZC straight
++        // from the payloads when zero-copy send is enabled and the batch is large
++        // enough, writev otherwise.
+         match self.engine.frame_batch_vectored(&self.coalesce_scratch) {
+           Ok(bufs) => {
+-            ops
+-              .sqe_blueprints
+-              .push(HandlerSqeBlueprint::RequestSendRawVectored {
++            let total: usize = bufs.iter().map(|b| b.len()).sum();
++            let blueprint = if self.use_send_zerocopy
++              && self.engine.config().use_send_zerocopy
++              && self.zc_copied_streak < ZC_COPIED_FALLBACK_AFTER
++              && total >= self.engine.config().zc_send_threshold
++              && bufs.len() <= libc::UIO_MAXIOV as usize
++            {
++              HandlerSqeBlueprint::RequestSendVectoredZc { bufs, batch_count }
++            } else {
++              HandlerSqeBlueprint::RequestSendRawVectored {
+                 bufs,
+                 send_op_flags: 0,
+                 batch_count,
+-              });
++              }
++            };
++            ops.sqe_blueprints.push(blueprint);
+           }
+           Err(e) => {
+             let _ = self
+@@ -778,6 +914,50 @@ impl UringConnectionHandler for ZmtpUringHandler {
+     ops
+   }
+ 
++  fn process_direct_recv(
++    &mut self,
++    buf: BytesMut,
++    cqe_result: i32,
++    _waitall: bool,
++    interface: &UringWorkerInterface<'_>,
++  ) -> HandlerIoOps {
++    self.direct_recv_in_flight = false;
++    if cqe_result == 0 {
++      self.engine.restore_recv_target(buf);
++      // Clean EOF: same teardown as a zero-length ring read.
++      return self.process_ring_read_bytes(Bytes::new(), interface);
++    }
++    if cqe_result < 0 {
++      self.engine.restore_recv_target(buf);
++      let errno = -cqe_result;
++      if errno == libc::ECANCELED || self.is_closing {
++        return HandlerIoOps::new();
++      }
++      if errno == libc::EAGAIN || errno == libc::EINTR {
++        // Transient; prepare_sqes issues the read again.
++        return HandlerIoOps::new();
++      }
++      warn!(
++        fd = self.fd,
++        errno, "ZmtpUringHandler: direct recv failed — closing connection"
++      );
++      return HandlerIoOps::new().set_error_close();
++    }
++    if self.is_closing {
++      // Bytes arriving after close was initiated are dropped, as on the ring read path.
++      self.engine.restore_recv_target(buf);
++      return HandlerIoOps::new();
++    }
++    let out = self.engine.on_direct_recv(buf);
++    let mut ops = self.apply_engine_output(out);
++    if !self.is_closing && !self.should_throttle_reads() {
++      if let Some(blueprint) = self.prepare_direct_recv() {
++        ops.sqe_blueprints.push(blueprint);
++      }
++    }
++    ops
++  }
++
+   fn handle_outgoing_app_data(
+     &mut self,
+     _data: crate::io_uring_backend::connection_handler::OutgoingMessage,
+@@ -906,6 +1086,24 @@ impl UringConnectionHandler for ZmtpUringHandler {
+     throttled
+   }
+ 
++  fn on_zerocopy_notification(&mut self, copied: bool) {
++    if self.zc_copied_streak >= ZC_COPIED_FALLBACK_AFTER {
++      return;
++    }
++    if !copied {
++      self.zc_copied_streak = 0;
++      return;
++    }
++    self.zc_copied_streak += 1;
++    if self.zc_copied_streak == ZC_COPIED_FALLBACK_AFTER {
++      info!(
++        fd = self.fd,
++        "ZmtpUringHandler: kernel copies every zero-copy send on this connection \
++         (loopback or no NIC support) — using writev instead"
++      );
++    }
++  }
++
+   fn attach_ingress(&mut self, mut sender: PipeMessageSender) {
+     debug!(fd = self.fd, "ZmtpUringHandler: ingress sender attached");
+ 
+diff --git a/core/src/protocol/zmtp/engine.rs b/core/src/protocol/zmtp/engine.rs
+index b42da80..4e9dc77 100644
+--- a/core/src/protocol/zmtp/engine.rs
++++ b/core/src/protocol/zmtp/engine.rs
+@@ -209,6 +209,55 @@ impl ZmtpEngine {
+     self.drive()
+   }
+ 
++  /// Bytes still to arrive before the data frame at the front of the receive buffer is
++  /// complete, once its header has been buffered. `None` outside the data phase, before
++  /// the header is complete, or when the framer transforms the wire stream.
++  pub fn pending_frame_missing(&self) -> Option<usize> {
++    if self.phase != ZmtpPhase::Data {
++      return None;
++    }
++    let total = self
++      .framer
++      .pending_frame_len(&self.network_read_accumulator)?;
++    Some(total.saturating_sub(self.network_read_accumulator.len()))
++  }
++
++  /// Number of bytes currently buffered but not yet decoded.
++  pub fn buffered_len(&self) -> usize {
++    self.network_read_accumulator.len()
++  }
++
++  /// Detach the receive buffer so the kernel can append received bytes directly into
++  /// its spare capacity (io_uring direct receive), instead of the bytes being copied in
++  /// from a provided-buffer ring slot. The buffered, not yet decoded bytes stay at the
++  /// front. The spare capacity is guaranteed to be at least `min_spare`; when it is not,
++  /// the buffered bytes move to a fresh allocation of `len + alloc` bytes (the only copy
++  /// on this path, bounded by the partial frame buffered so far). Hand the buffer back
++  /// with [`on_direct_recv`](Self::on_direct_recv) once the receive completes.
++  pub fn take_recv_target(&mut self, min_spare: usize, alloc: usize) -> BytesMut {
++    let mut buf = std::mem::take(&mut self.network_read_accumulator);
++    if buf.capacity() - buf.len() < min_spare {
++      let mut fresh = BytesMut::with_capacity(buf.len() + alloc.max(min_spare));
++      fresh.extend_from_slice(&buf);
++      buf = fresh;
++    }
++    buf
++  }
++
++  /// Re-attach a buffer obtained from [`take_recv_target`](Self::take_recv_target) whose
++  /// length now also covers the newly received bytes, and run the protocol state machine
++  /// over it. Complete frames are sliced out of it without copying.
++  pub fn on_direct_recv(&mut self, buf: BytesMut) -> EngineOutput {
++    self.network_read_accumulator = buf;
++    self.drive()
++  }
++
++  /// Re-attach a buffer from [`take_recv_target`](Self::take_recv_target) without
++  /// decoding anything (the receive failed or was cancelled).
++  pub fn restore_recv_target(&mut self, buf: BytesMut) {
++    self.network_read_accumulator = buf;
++  }
++
+   /// Run the protocol state machine over the current accumulator contents
+   /// (already appended via `on_network_bytes`, or moved in via `drive_buf`).
+   pub fn drive(&mut self) -> EngineOutput {
+diff --git a/core/src/protocol/zmtp/manual_parser.rs b/core/src/protocol/zmtp/manual_parser.rs
+index d54fe4b..17f1ac6 100644
+--- a/core/src/protocol/zmtp/manual_parser.rs
++++ b/core/src/protocol/zmtp/manual_parser.rs
+@@ -102,6 +102,17 @@ impl ZmtpManualParser {
+     Ok(Some(header_len + raw_size as usize))
+   }
+ 
++  /// Total wire length (header + body) of the frame being decoded from `src`, once its
++  /// header is complete — i.e. how many buffered bytes `decode_from_buffer` needs before
++  /// it can return that frame. `None` while the header is incomplete or invalid (the
++  /// decode path reports errors).
++  pub fn pending_frame_len(&self, src: &[u8]) -> Option<usize> {
++    match self.state {
++      ManualDecodingState::ReadHeader => self.peek_frame_len(src).ok().flatten(),
++      ManualDecodingState::ReadBody { size, .. } => Some(size),
++    }
++  }
++
+   /// Parse one ZMTP frame from a `Bytes` chunk without allocating.
+   /// Uses `Bytes::slice()` (atomic refcount bump) instead of copying payload data.
+   pub fn decode_frame_from_bytes(&self, src: &Bytes) -> Result<Option<(Msg, usize)>, ZmqError> {
+diff --git a/core/src/security/framer/mod.rs b/core/src/security/framer/mod.rs
+index d9a0948..693cd7e 100644
+--- a/core/src/security/framer/mod.rs
++++ b/core/src/security/framer/mod.rs
+@@ -35,6 +35,14 @@ pub(crate) trait ISecureFramer: Send + Sync + 'static {
+     Ok(())
+   }
+ 
++  /// Wire bytes (from the front of `network_buffer`) that complete the frame currently
++  /// being decoded, once its header has arrived. Only framers whose wire format is plain
++  /// ZMTP frames can answer; framers that transform the stream (encryption) return `None`,
++  /// which keeps their connections on the regular receive path.
++  fn pending_frame_len(&self, _network_buffer: &[u8]) -> Option<usize> {
++    None
++  }
++
+   fn try_read_msgs_from_bytes(
+     &mut self,
+     data: Bytes,
+@@ -71,6 +79,10 @@ impl ISecureFramer for NullFramer {
+     self.parser.decode_from_buffer(network_buffer)
+   }
+ 
++  fn pending_frame_len(&self, network_buffer: &[u8]) -> Option<usize> {
++    self.parser.pending_frame_len(network_buffer)
++  }
++
+   fn write_msg_multipart(&mut self, msgs: FrameBatch) -> Result<Bytes, ZmqError> {
+     self.framer.frame_contiguous(&[msgs])
+   }
+diff --git a/core/src/socket/options.rs b/core/src/socket/options.rs
+index b9daf71..0098dec 100644
+--- a/core/src/socket/options.rs
++++ b/core/src/socket/options.rs
+@@ -7,6 +7,8 @@ pub const DEFAULT_SNDBATCH_COUNT: usize = 128;
+ pub const DEFAULT_SNDBATCH_BYTES: usize = 256 * 1024; // 256 KB
+ pub const DEFAULT_RCVBATCH_COUNT: usize = 128;
+ pub const DEFAULT_RCVBATCH_BYTES: usize = 256 * 1024; // 256 KB;
++/// Default for `IO_URING_RCV_DIRECT_THRESHOLD` (bytes of frame body still to arrive).
++pub const DEFAULT_IO_URING_RCV_DIRECT_THRESHOLD: usize = 32 * 1024;
+ 
+ // Use values consistent with libzmq where possible
+ pub const SNDBUF: i32 = 11;
+@@ -74,6 +76,14 @@ pub const IO_URING_SESSION_ENABLED: i32 = 1175;
+ #[cfg(feature = "io-uring")]
+ pub const IO_URING_ZC_SEND_THRESHOLD: i32 = 1176;
+ 
++/// Direct (zero-copy) receive threshold in bytes for io_uring sessions with multishot
++/// receive. Once a connection sees a data frame with at least this many body bytes still
++/// to arrive, it stops reading through the provided-buffer ring (which forces a copy into
++/// the frame buffer) and receives each large frame body straight into its final message
++/// buffer instead, like libzmq. 0 disables it. Default 32768.
++#[cfg(feature = "io-uring")]
++pub const IO_URING_RCV_DIRECT_THRESHOLD: i32 = 1177;
++
+ pub const ADAPTIVE_THROTTLE: i32 = 1210;
+ 
+ /// Allow downgrading to the ZMTP/2.0 wire protocol when a peer announces it.
+@@ -224,6 +234,8 @@ pub struct IOURingSocketOptions {
+   /// Minimum payload bytes to use zero-copy send (SEND_ZC) instead of a copy-based send.
+   /// Default 16384 bytes — below this the memcpy is cheaper than the kernel memory-lock cost.
+   pub zc_send_threshold: usize,
++  /// See `IO_URING_RCV_DIRECT_THRESHOLD`; 0 disables direct receive.
++  pub rcv_direct_threshold: usize,
+ }
+ 
+ impl Default for IOURingSocketOptions {
+@@ -233,6 +245,7 @@ impl Default for IOURingSocketOptions {
+       send_zerocopy: false,
+       recv_multishot: false,
+       zc_send_threshold: 16384,
++      rcv_direct_threshold: DEFAULT_IO_URING_RCV_DIRECT_THRESHOLD,
+     }
+   }
+ }
+@@ -334,6 +347,9 @@ pub(crate) struct ZmtpEngineConfig {
+   /// Derived from IO_URING_ZC_SEND_THRESHOLD socket option; default 16384 bytes.
+   #[cfg(feature = "io-uring")]
+   pub zc_send_threshold: usize,
++  /// Derived from IO_URING_RCV_DIRECT_THRESHOLD; 0 disables direct receive.
++  #[cfg(feature = "io-uring")]
++  pub rcv_direct_threshold: usize,
+ }
+ 
+ impl Default for ZmtpEngineConfig {
+@@ -382,6 +398,8 @@ impl Default for ZmtpEngineConfig {
+       rcvbuf: None,
+       #[cfg(feature = "io-uring")]
+       zc_send_threshold: 16384,
++      #[cfg(feature = "io-uring")]
++      rcv_direct_threshold: DEFAULT_IO_URING_RCV_DIRECT_THRESHOLD,
+     }
+   }
+ }
+@@ -489,6 +507,8 @@ impl From<&SocketOptions> for ZmtpEngineConfig {
+       rcvbuf: options.rcvbuf,
+       #[cfg(feature = "io-uring")]
+       zc_send_threshold: options.io_uring.zc_send_threshold,
++      #[cfg(feature = "io-uring")]
++      rcv_direct_threshold: options.io_uring.rcv_direct_threshold,
+     }
+   }
+ }
+@@ -777,6 +797,9 @@ pub(crate) fn apply_core_option_value(
+         #[cfg(feature = "io-uring")]
+         IO_URING_ZC_SEND_THRESHOLD => options.io_uring.zc_send_threshold = parse_i32_option(value)?.max(1) as usize,
+ 
++        #[cfg(feature = "io-uring")]
++        IO_URING_RCV_DIRECT_THRESHOLD => options.io_uring.rcv_direct_threshold = parse_i32_option(value)?.max(0) as usize,
++
+         ADAPTIVE_THROTTLE => options.throttle_config.enabled = parse_bool_option(value)?,
+         SNDBATCH_COUNT => options.sndbatch_count = parse_i32_option(value)?.max(1) as usize,
+         SNDBATCH_BYTES => options.sndbatch_bytes = parse_i32_option(value)?.max(1) as usize,
+@@ -850,6 +873,9 @@ pub(crate) fn retrieve_core_option_value(
+         #[cfg(feature = "io-uring")]
+         IO_URING_ZC_SEND_THRESHOLD => Ok((options.io_uring.zc_send_threshold as i32).to_ne_bytes().to_vec()),
+ 
++        #[cfg(feature = "io-uring")]
++        IO_URING_RCV_DIRECT_THRESHOLD => Ok((options.io_uring.rcv_direct_threshold as i32).to_ne_bytes().to_vec()),
++
+         ADAPTIVE_THROTTLE => Ok((options.throttle_config.enabled as i32).to_ne_bytes().to_vec()),
+         SNDBATCH_COUNT => Ok((options.sndbatch_count as i32).to_ne_bytes().to_vec()),
+         SNDBATCH_BYTES => Ok((options.sndbatch_bytes as i32).to_ne_bytes().to_vec()),
+diff --git a/core/tests/io_uring_direct_recv.rs b/core/tests/io_uring_direct_recv.rs
+new file mode 100644
+index 0000000..fbfc9f8
+--- /dev/null
++++ b/core/tests/io_uring_direct_recv.rs
+@@ -0,0 +1,285 @@
++//! io_uring direct (zero-copy) receive: once a connection sees a large frame, frame bodies
++//! are received straight into their message buffer instead of through the provided-buffer
++//! ring (`IO_URING_RCV_DIRECT_THRESHOLD`). These tests check the bytes end to end across the
++//! mode switch, frame sizes on both sides of the ring slot size, the threshold and the
++//! preallocation cap, multipart messages, and peers that vanish in the middle of a frame.
++#![cfg(feature = "io-uring")]
++
++mod common;
++
++use rzmq::socket::options::{
++  IO_URING_RCVMULTISHOT, IO_URING_RCV_DIRECT_THRESHOLD, IO_URING_SESSION_ENABLED, LAST_ENDPOINT,
++  LINGER, RCVHWM, SNDHWM, SUBSCRIBE,
++};
++use rzmq::uring::{initialize_uring_backend, UringConfig};
++use rzmq::{Msg, MsgFlags, Socket, SocketType, ZmqError};
++use serial_test::serial;
++use std::io::{Read, Write};
++use std::net::TcpStream;
++use std::sync::atomic::{AtomicBool, Ordering};
++use std::sync::Once;
++use std::time::Duration;
++
++static URING_INIT: Once = Once::new();
++static URING_AVAILABLE: AtomicBool = AtomicBool::new(false);
++
++fn init_uring() -> bool {
++  URING_INIT.call_once(|| {
++    match initialize_uring_backend(UringConfig {
++      default_recv_multishot: true,
++      num_workers: 1,
++      ..Default::default()
++    }) {
++      Ok(()) => URING_AVAILABLE.store(true, Ordering::Relaxed),
++      Err(e) => eprintln!("io_uring not available on this system, skipping tests: {}", e),
++    }
++  });
++  URING_AVAILABLE.load(Ordering::Relaxed)
++}
++
++const RECV_TIMEOUT: Duration = Duration::from_secs(20);
++
++/// Deterministic, position- and message-dependent bytes, so misplaced or stale data is caught.
++fn payload(seq: u32, len: usize) -> Vec<u8> {
++  let mut state = 0x9E37_79B9_7F4A_7C15u64 ^ (u64::from(seq) << 32 | len as u64);
++  (0..len)
++    .map(|_| {
++      state ^= state << 13;
++      state ^= state >> 7;
++      state ^= state << 17;
++      state as u8
++    })
++    .collect()
++}
++
++async fn endpoint_of(socket: &Socket) -> String {
++  String::from_utf8(socket.get_option(LAST_ENDPOINT).await.unwrap()).unwrap()
++}
++
++async fn uring_socket(ctx: &rzmq::Context, kind: SocketType, direct_threshold: Option<i32>) -> Socket {
++  let s = ctx.socket(kind).unwrap();
++  s.set_option_raw(IO_URING_SESSION_ENABLED, &1i32.to_ne_bytes()).await.unwrap();
++  s.set_option_raw(IO_URING_RCVMULTISHOT, &1i32.to_ne_bytes()).await.unwrap();
++  s.set_option_raw(SNDHWM, &10_000i32.to_ne_bytes()).await.unwrap();
++  s.set_option_raw(RCVHWM, &10_000i32.to_ne_bytes()).await.unwrap();
++  s.set_option_raw(LINGER, &2_000i32.to_ne_bytes()).await.unwrap();
++  if let Some(t) = direct_threshold {
++    s.set_option_raw(IO_URING_RCV_DIRECT_THRESHOLD, &t.to_ne_bytes()).await.unwrap();
++  }
++  s
++}
++
++async fn recv(socket: &Socket) -> Msg {
++  common::recv_timeout(socket, RECV_TIMEOUT)
++    .await
++    .expect("message not received in time")
++}
++
++/// Sizes around every boundary the receive path cares about: short/long ZMTP frames, the
++/// provided-buffer slot size (~64 KiB), the direct threshold (32 KiB), typical large
++/// messages, and above the 16 MiB preallocation cap (buffer grows as data arrives).
++const SIZES: &[usize] = &[
++  0,
++  1,
++  255,
++  256,
++  4096,
++  16 << 10,
++  (32 << 10) - 1,
++  32 << 10,
++  (32 << 10) + 1,
++  64 << 10,
++  100 << 10,
++  256 << 10,
++  1 << 20,
++  3 << 20,
++  7,
++  (1 << 20) + 13,
++  (17 << 20) + 5,
++  9,
++  512 << 10,
++];
++
++async fn stream_sizes(direct_threshold: Option<i32>) {
++  let ctx = common::test_context();
++  let pull = uring_socket(&ctx, SocketType::Pull, direct_threshold).await;
++  pull.bind("tcp://127.0.0.1:0").await.unwrap();
++  let ep = endpoint_of(&pull).await;
++  let push = uring_socket(&ctx, SocketType::Push, None).await;
++  push.connect(&ep).await.unwrap();
++
++  let rounds = 3u32;
++  let sender = tokio::spawn({
++    let push = push.clone();
++    async move {
++      for round in 0..rounds {
++        for (i, &len) in SIZES.iter().enumerate() {
++          let seq = round * 1000 + i as u32;
++          push.send(Msg::from_vec(payload(seq, len))).await?;
++        }
++      }
++      Ok::<(), ZmqError>(())
++    }
++  });
++  for round in 0..rounds {
++    for (i, &len) in SIZES.iter().enumerate() {
++      let seq = round * 1000 + i as u32;
++      let msg = recv(&pull).await;
++      let data = msg.data().unwrap_or(&[]);
++      assert_eq!(data.len(), len, "message {seq}: wrong length");
++      assert!(data == payload(seq, len).as_slice(), "message {seq} ({len} bytes): wrong bytes");
++    }
++  }
++  sender.await.unwrap().unwrap();
++  ctx.term().await.unwrap();
++}
++
++#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
++#[serial]
++async fn direct_recv_mixed_sizes() {
++  if !init_uring() {
++    return;
++  }
++  stream_sizes(None).await; // default threshold (direct receive on)
++}
++
++#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
++#[serial]
++async fn direct_recv_low_threshold() {
++  if !init_uring() {
++    return;
++  }
++  stream_sizes(Some(1)).await; // every partial frame goes direct
++}
++
++#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
++#[serial]
++async fn direct_recv_disabled() {
++  if !init_uring() {
++    return;
++  }
++  stream_sizes(Some(0)).await; // provided-buffer path only
++}
++
++#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
++#[serial]
++async fn direct_recv_multipart_topic_and_large_body() {
++  if !init_uring() {
++    return;
++  }
++  let ctx = common::test_context();
++  let sub = uring_socket(&ctx, SocketType::Sub, None).await;
++  sub.set_option_raw(SUBSCRIBE, b"topic").await.unwrap();
++  sub.bind("tcp://127.0.0.1:0").await.unwrap();
++  let ep = endpoint_of(&sub).await;
++  let publ = uring_socket(&ctx, SocketType::Pub, None).await;
++  publ.connect(&ep).await.unwrap();
++  tokio::time::sleep(Duration::from_millis(300)).await; // subscription reaches the PUB
++
++  let bodies: Vec<usize> = vec![1 << 20, 300, 256 << 10, 5, (2 << 20) + 1, 100 << 10, 0, 1 << 20];
++  let sender = tokio::spawn({
++    let publ = publ.clone();
++    let bodies = bodies.clone();
++    async move {
++      for (seq, &len) in bodies.iter().enumerate() {
++        let mut topic = Msg::from_vec(format!("topic-{seq}").into_bytes());
++        topic.set_flags(MsgFlags::MORE);
++        publ
++          .send_multipart(vec![topic, Msg::from_vec(payload(seq as u32, len))])
++          .await?;
++      }
++      Ok::<(), ZmqError>(())
++    }
++  });
++  for (seq, &len) in bodies.iter().enumerate() {
++    let topic = recv(&sub).await;
++    assert_eq!(topic.data().unwrap_or(&[]), format!("topic-{seq}").as_bytes());
++    assert!(topic.is_more(), "topic frame {seq} lost its MORE flag");
++    let body = recv(&sub).await;
++    assert!(!body.is_more());
++    assert!(
++      body.data().unwrap_or(&[]) == payload(seq as u32, len).as_slice(),
++      "body {seq} ({len} bytes): wrong bytes"
++    );
++  }
++  sender.await.unwrap().unwrap();
++  ctx.term().await.unwrap();
++}
++
++/// Minimal raw ZMTP 3.1 peer (NULL mechanism) acting as a PUSH socket.
++fn raw_push_handshake(ep: &str) -> TcpStream {
++  let addr = ep.trim_start_matches("tcp://");
++  let mut s = TcpStream::connect(addr).unwrap();
++  s.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
++  let mut greeting = vec![0xFF, 0, 0, 0, 0, 0, 0, 0, 0, 0x7F, 3, 1];
++  greeting.extend_from_slice(b"NULL");
++  greeting.resize(64, 0);
++  s.write_all(&greeting).unwrap();
++  let mut peer_greeting = [0u8; 64];
++  s.read_exact(&mut peer_greeting).unwrap();
++  let mut body = vec![5u8];
++  body.extend_from_slice(b"READY");
++  body.push(11);
++  body.extend_from_slice(b"Socket-Type");
++  body.extend_from_slice(&4u32.to_be_bytes());
++  body.extend_from_slice(b"PUSH");
++  let mut ready = vec![0x04, body.len() as u8];
++  ready.extend_from_slice(&body);
++  s.write_all(&ready).unwrap();
++  let mut hdr = [0u8; 2];
++  s.read_exact(&mut hdr).unwrap(); // peer READY (short command)
++  let mut rest = vec![0u8; hdr[1] as usize];
++  s.read_exact(&mut rest).unwrap();
++  s
++}
++
++#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
++#[serial]
++async fn direct_recv_peer_vanishes_mid_frame() {
++  if !init_uring() {
++    return;
++  }
++  let ctx = common::test_context();
++  let pull = uring_socket(&ctx, SocketType::Pull, None).await;
++  pull.bind("tcp://127.0.0.1:0").await.unwrap();
++  let ep = endpoint_of(&pull).await;
++
++  for round in 0..40u32 {
++    // A peer announces a large frame (sometimes absurdly large), sends part of the body
++    // so the receiver is waiting in a direct receive, then disappears (FIN or RST).
++    let ep_raw = ep.clone();
++    tokio::task::spawn_blocking(move || {
++      let mut s = raw_push_handshake(&ep_raw);
++      let declared: u64 = if round % 5 == 0 { 1 << 44 } else { (2 << 20) + u64::from(round) };
++      let mut frame = vec![0x02];
++      frame.extend_from_slice(&declared.to_be_bytes());
++      s.write_all(&frame).unwrap();
++      s.write_all(&vec![0xAB; 100 << 10]).unwrap();
++      std::thread::sleep(Duration::from_millis(20));
++      if round % 2 == 0 {
++        let sock = socket2::SockRef::from(&s);
++        sock.set_linger(Some(Duration::ZERO)).unwrap(); // RST on close
++      }
++    })
++    .await
++    .unwrap();
++
++    // A well-behaved peer right after (likely reusing the fd number): its large messages
++    // must arrive intact. The first switches its connection to direct receive; the later
++    // ones are received directly into their buffers.
++    let push = uring_socket(&ctx, SocketType::Push, None).await;
++    push.connect(&ep).await.unwrap();
++    for i in 0..3u32 {
++      let seq = round * 10 + i;
++      let len = (1 << 20) + seq as usize;
++      push.send(Msg::from_vec(payload(seq, len))).await.unwrap();
++      let msg = recv(&pull).await;
++      assert!(
++        msg.data().unwrap_or(&[]) == payload(seq, len).as_slice(),
++        "round {round} message {i}: wrong bytes after a mid-frame disconnect"
++      );
++    }
++    push.close().await.unwrap();
++  }
++  ctx.term().await.unwrap();
++}

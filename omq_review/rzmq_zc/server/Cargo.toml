@@ -1,0 +1,25 @@
+[package]
+name = "rzmq-zc-server"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "rzmq_proxy built against rzmq 0.5.26 + the zero-copy patches in ../patches"
+
+# Same source as servers/src/bin/rzmq_proxy.rs; the `rzmq-zc` feature enables the flags
+# for options that only the patched rzmq has.
+[[bin]]
+name = "rzmq_proxy_zc"
+path = "../../servers/src/bin/rzmq_proxy.rs"
+
+[features]
+default = ["rzmq-zc"]
+rzmq-zc = []
+
+[dependencies]
+# Upstream rzmq at the 0.5.26 release commit with ../patches applied; ../prepare.sh
+# creates this checkout.
+rzmq = { path = "../src-rzmq/core", features = ["io-uring"] }
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "time", "signal"] }
+
+[profile.release]
+debug = "line-tables-only"

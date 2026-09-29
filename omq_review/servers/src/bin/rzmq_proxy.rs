@@ -22,6 +22,11 @@
 //!   --sndtimeo MS       PUB send timeout (rzmq default -1 = wait forever on a full subscriber)
 //!   --tokio-workers N   Tokio worker threads (default 2)
 //!   --sqpoll            IORING_SETUP_SQPOLL (kernel SQ polling thread per io_uring worker)
+//!
+//! Only when built against the patched rzmq (rzmq_zc/server, feature `rzmq-zc`):
+//!   --rcv-direct-threshold N  IO_URING_RCV_DIRECT_THRESHOLD on both sockets: frame bodies
+//!                             with >= N bytes still to arrive are received straight into
+//!                             their message buffer (patch default 32768; 0 = stock path)
 use rzmq::socket::{
     ADAPTIVE_THROTTLE, IO_URING_RCVMULTISHOT, IO_URING_SESSION_ENABLED, IO_URING_SNDZEROCOPY,
     MAXMSGSIZE, RCVHWM, SNDHWM, SNDTIMEO, SUBSCRIBE, TCP_CORK,
@@ -43,6 +48,7 @@ struct Args {
     sndtimeo: Option<i32>,
     tokio_workers: usize,
     sqpoll: bool,
+    rcv_direct_threshold: Option<i32>,
 }
 
 fn parse_args() -> Args {
@@ -59,6 +65,7 @@ fn parse_args() -> Args {
         sndtimeo: None,
         tokio_workers: 2,
         sqpoll: false,
+        rcv_direct_threshold: None,
     };
     let mut it = std::env::args().skip(1);
     while let Some(k) = it.next() {
@@ -76,6 +83,9 @@ fn parse_args() -> Args {
             "--max-msg-size" => a.max_msg = Some(v().parse().expect("int")),
             "--sndtimeo" => a.sndtimeo = Some(v().parse().expect("int")),
             "--tokio-workers" => a.tokio_workers = v().parse().expect("int"),
+            "--rcv-direct-threshold" if cfg!(feature = "rzmq-zc") => {
+                a.rcv_direct_threshold = Some(v().parse().expect("int"))
+            }
             // accepted for CLI parity with the other servers
             "--io-threads" | "--run-on" | "--slot-cap" => {
                 let _ = v();
@@ -107,6 +117,10 @@ async fn configure(s: &Socket, a: &Args, uring: bool, zc: bool) -> Result<(), rz
         if zc {
             s.set_option(IO_URING_SNDZEROCOPY, true).await?;
         }
+    }
+    #[cfg(feature = "rzmq-zc")]
+    if let Some(t) = a.rcv_direct_threshold {
+        s.set_option(rzmq::socket::IO_URING_RCV_DIRECT_THRESHOLD, t).await?;
     }
     Ok(())
 }
@@ -151,8 +165,9 @@ fn main() {
         sub.bind(&a.frontend).await.expect("bind sub");
         publ.bind(&a.backend).await.expect("bind pub");
         println!(
-            "READY rzmq 0.5.26 mode={} cork={} throttle={:?} workers={:?} strategy={} sqpoll={} hwm={:?}",
-            a.mode, a.cork, a.throttle, a.workers, a.strategy, a.sqpoll, a.hwm
+            "READY rzmq 0.5.26{} mode={} cork={} throttle={:?} workers={:?} strategy={} sqpoll={} hwm={:?} rcv_direct_threshold={:?}",
+            if cfg!(feature = "rzmq-zc") { "+zc-patches" } else { "" },
+            a.mode, a.cork, a.throttle, a.workers, a.strategy, a.sqpoll, a.hwm, a.rcv_direct_threshold
         );
         loop {
             let frames = match sub.recv_multipart().await {

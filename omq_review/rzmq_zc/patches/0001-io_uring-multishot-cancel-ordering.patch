@@ -1,0 +1,70 @@
+rzmq 0.5.26: io_uring multishot reader — survive the cancel CQE arriving before the
+cancelled op's final -ECANCELED CQE.
+
+When a RECV_MULTISHOT is cancelled, the kernel usually posts the ASYNC_CANCEL's own CQE
+first and the cancelled op's terminal -ECANCELED CQE afterwards. MultishotReader forgot
+the op on the first CQE, so the second one matched nothing, and the worker force-closed
+the connection ("Handshake Safety Gate: multishot CQE not delegated"). Upstream only
+cancels while closing, so it went unnoticed; any cancel on a live connection hit it. The
+reader now waits for both CQEs, in either order. Adds MultishotReader::is_idle().
+
+diff --git a/core/src/io_uring_backend/worker/multishot_reader.rs b/core/src/io_uring_backend/worker/multishot_reader.rs
+index 5330f6c..76064d1 100644
+--- a/core/src/io_uring_backend/worker/multishot_reader.rs
++++ b/core/src/io_uring_backend/worker/multishot_reader.rs
+@@ -71,6 +71,17 @@ impl MultishotReader {
+     matches!(self.flow_state, MultishotFlowState::Paused)
+   }
+ 
++  /// True when nothing of this reader is in the kernel or queued for it: no armed
++  /// multishot op (not even one whose cancellation is still completing), no ASYNC_CANCEL
++  /// in flight, and no arm blueprint waiting in the work map. Only then may another read
++  /// op be issued on the fd without racing this one for the stream's bytes.
++  pub fn is_idle(&self) -> bool {
++    !self.is_active
++      && self.active_op_user_data.is_none()
++      && self.cancel_op_user_data.is_none()
++      && !self.arm_pending
++  }
++
+   /// Transition to `Paused` state. Called when the cancel CQE (or -ECANCELED on the
+   /// original multishot CQE) is reaped.
+   fn acknowledge_pause(&mut self) {
+@@ -192,13 +203,18 @@ impl MultishotReader {
+         }
+         if errno == libc::ECANCELED as i32 {
+           // The original multishot CQE arrived with -ECANCELED (from our ASYNC_CANCEL).
+-          // Transition to Paused and clean up — this is not an error.
++          // Not an error. The cancel's own CQE may still be outstanding (it usually
++          // arrives first, but not always); Paused is confirmed once both are reaped.
+           tracing::debug!(
+-            "[MultishotReader FD={}] Original multishot (ud {}) received -ECANCELED; confirming Paused.",
++            "[MultishotReader FD={}] Original multishot (ud {}) received -ECANCELED.",
+             self.fd,
+             cqe_ud
+           );
+-          self.acknowledge_pause();
++          self.active_op_user_data = None;
++          self.is_active = false;
++          if self.cancel_op_user_data.is_none() {
++            self.acknowledge_pause();
++          }
+           return Ok((ops_to_return, true));
+         }
+         if errno == libc::ENOBUFS {
+@@ -349,7 +365,14 @@ impl MultishotReader {
+           cqe_res
+         );
+       }
+-      self.acknowledge_pause();
++      // The kernel posts the cancel's CQE before the cancelled op's final -ECANCELED
++      // CQE in the common case. Keep matching the op until that terminal CQE is reaped;
++      // forgetting it here would leave it unmatched, and an unmatched multishot CQE makes
++      // the worker force-close the connection.
++      self.cancel_op_user_data = None;
++      if self.active_op_user_data.is_none() {
++        self.acknowledge_pause();
++      }
+       return Ok((ops_to_return, true));
+     } else {
+       // This CQE was not for this MultishotReader. This should ideally not be reached

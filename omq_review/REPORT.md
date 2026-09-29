@@ -617,13 +617,18 @@ Tokio 2,395 (0%), omq-hardened 2,474 (22–34% loss), rzmq io_uring 1-worker 1,6
 ### Why io_uring doesn't help 100 KB–1 MB messages much here
 
 1. **Large messages are copy-bound, not syscall-bound.** A 1 MB message costs a handful of
-   syscalls but ~1 MB of memory copying at several points (kernel loopback copy, userspace
-   framing). io_uring removes syscall and context-switch overhead; it does not remove copies. At
-   100 KB the fixed per-message overhead is a bigger share, which is exactly where it helped.
-2. **rzmq's "zero-copy" send isn't zero-copy end to end.** It first copies each message into a
-   pre-registered send buffer (`io_uring_backend/worker/cqe_processor.rs:160-180`,
-   `acquire_and_prep_buffer` → `len_copied`) and then issues `SEND_ZC`; on loopback the kernel copies
-   again when it delivers to the local receiver.
+   syscalls but ~1 MB of memory copying at several points. io_uring removes syscall and
+   context-switch overhead; it does not remove copies. At 100 KB the fixed per-message overhead is
+   a bigger share, which is exactly where it helped. Most of those copies turned out to be rzmq's
+   own (next item).
+2. **rzmq copies every received byte about 1.7 times in userspace** (found after this addendum was
+   first written; measured and fixed in [Addendum 2](#addendum-2-patching-rzmq-for-zero-copy)). Its
+   io_uring receive path copies each provided-buffer ring slot into the engine's frame buffer and
+   regrows that buffer while a large frame builds up. *Correction:* an earlier version of this item
+   blamed the zero-copy **send** (a copy into a registered buffer before `SEND_ZC`). That code exists
+   but never runs for data: kernel tracepoints show every data batch leaves as a `WRITEV` straight
+   from the message buffers, with or without `IO_URING_SNDZEROCOPY`, so the send side had no
+   userspace copy to begin with.
 3. **One io_uring worker by default.** rzmq uses `ceil(ncpu/2) − 2`, minimum 1 → **1 worker** on
    4 vCPUs. All connections funnel through it; it sat at 100% CPU at 1 MB while Tokio mode spread the
    same work across two threads. A second worker recovers Tokio-level throughput, not more.
@@ -645,6 +650,7 @@ matter more for small messages; for 100 KB–1 MB they stay secondary to copying
   **Fix: set `SNDTIMEO=0` on the PUB** (libzmq-style drop). Confirmed: 100 KB fast subscriber back
   to 16,190 msg/s; at 1 MB it improves to 448 msg/s (vs 208 default) but stays far below
   omq-hardened's 2,113, and ~575 MB is queued for the slow subscriber (libzmq: ~850 MB).
+  Patch 0003 in [Addendum 2](#addendum-2-patching-rzmq-for-zero-copy) makes dropping the default.
 * **Robustness is better than omq out of the box:** survives the C1 oversized-frame attack in both
   modes; no livelock with 65 topics or 10 subscribers × 10 topics; **0% loss in every closed-loop
   and flood run** (it blocks rather than drops); a stray data/empty/multipart frame from a subscriber
@@ -661,7 +667,9 @@ rzmq + io_uring is genuinely fast for ~100 KB messages with healthy consumers (a
 best-in-class latency and fan-out) and is more robust out of the box than omq. But for 256 KB–1 MB
 it is ~1.6× slower than libzmq whether or not io_uring is on, it cannot be a faithful XPUB/XSUB
 broker, and its default blocking PUB lets one slow subscriber stall everyone unless you set
-`SNDTIMEO=0`. It is not a drop-in replacement for a libzmq XPUB/XSUB broker either.
+`SNDTIMEO=0`. It is not a drop-in replacement for a libzmq XPUB/XSUB broker either. The receive
+copies and the blocking PUB are both fixed by the patches in
+[Addendum 2](#addendum-2-patching-rzmq-for-zero-copy).
 
 ## If you must run omq for this today (native API)
 

@@ -25,6 +25,8 @@ import time
 
 XBIN = os.environ.get("XBIN", "/home/user/xbin")
 XTGT = os.environ.get("XTGT", "/home/user/xproxy-target/release")
+# rzmq_proxy built against rzmq 0.5.26 + rzmq_zc/patches (rzmq_zc/server)
+XZC = os.environ.get("XZC", "/home/user/rzmq-zc-target/release")
 SERVERS = {
     "libzmq-c": [f"{XBIN}/xproxy_libzmq"],
     "rust-zmq": [f"{XTGT}/libzmq_proxy"],
@@ -37,6 +39,13 @@ SERVERS = {
     "rzmq-tokio": [f"{XTGT}/rzmq_proxy", "--mode", "tokio"],
     "rzmq-tokio-nothrottle": [f"{XTGT}/rzmq_proxy", "--mode", "tokio", "--throttle", "off"],
     "rzmq-uring": [f"{XTGT}/rzmq_proxy", "--mode", "uring", "--throttle", "off"],
+    # patched rzmq (rzmq_zc/patches): direct receive + SENDMSG_ZC + non-blocking PUB
+    "rzmqzc-tokio": [f"{XZC}/rzmq_proxy_zc", "--mode", "tokio"],
+    "rzmqzc-uring": [f"{XZC}/rzmq_proxy_zc", "--mode", "uring", "--throttle", "off"],
+    "rzmqzc-uring-zc": [f"{XZC}/rzmq_proxy_zc", "--mode", "uring-zc", "--throttle", "off"],
+    # same patched binary with direct receive off (stock receive path) for A/B
+    "rzmqzc-uring-nodirect": [f"{XZC}/rzmq_proxy_zc", "--mode", "uring", "--throttle", "off",
+                              "--rcv-direct-threshold", "0"],
     "rzmq-uring-w2": [f"{XTGT}/rzmq_proxy", "--mode", "uring", "--workers", "2", "--throttle", "off"],
     "rzmq-uring-w2-perf": [f"{XTGT}/rzmq_proxy", "--mode", "uring", "--workers", "2", "--strategy",
                            "performance", "--throttle", "off"],

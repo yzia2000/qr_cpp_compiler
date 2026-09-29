@@ -13,6 +13,7 @@ Layout:
 | dir | what |
 |---|---|
 | `servers/` | XSUB/XPUB proxy servers (omq native, omq hardened, rust-zmq, zmq.rs) plus an rzmq SUB→PUB forwarder (Tokio or io_uring), one CLI |
+| `rzmq_zc/` | three patches against rzmq 0.5.26 (zero-copy io_uring receive, real `SENDMSG_ZC` send, non-blocking PUB), `prepare.sh`, and the crate that builds `rzmq_proxy_zc` against them |
 | `c_proxy/` | libzmq C-API proxy, built against system libzmq and against omq's `libomq_zmq.so` |
 | `client/` | `xbench.cpp` — independent libzmq load generator + byte-for-byte verifier |
 | `scenarios/` | pyzmq/raw-socket conformance, churn soak, and ZMTP edge-case peers |

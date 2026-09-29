@@ -1,0 +1,98 @@
+{
+ "scenario": "scenarios/midframe_churn.py",
+ "runs": [
+  {
+   "server": "rzmqzc-uring",
+   "alive": true,
+   "churn": {
+    "conns": 322,
+    "errors": 0,
+    "aborted": 156,
+    "huge": 18
+   },
+   "xbench": {
+    "sent": 45354,
+    "received": 45354,
+    "bad": 0,
+    "msgs_s": 2267.9,
+    "first_error": ""
+   },
+   "rss_mb": {
+    "start": 10.5078125,
+    "peak": 21.84765625,
+    "end": 20.41015625
+   },
+   "pass": true
+  },
+  {
+   "server": "rzmqzc-uring-zc",
+   "alive": true,
+   "churn": {
+    "conns": 322,
+    "errors": 0,
+    "aborted": 165,
+    "huge": 9
+   },
+   "xbench": {
+    "sent": 44020,
+    "received": 44020,
+    "bad": 0,
+    "msgs_s": 2201.3,
+    "first_error": ""
+   },
+   "rss_mb": {
+    "start": 14.75,
+    "peak": 27.5859375,
+    "end": 27.5859375
+   },
+   "pass": true
+  },
+  {
+   "server": "rzmqzc-uring",
+   "alive": true,
+   "churn": {
+    "conns": 897,
+    "errors": 0,
+    "aborted": 422,
+    "huge": 48
+   },
+   "xbench": {
+    "sent": 99538,
+    "received": 99538,
+    "bad": 0,
+    "msgs_s": 2211.9,
+    "first_error": ""
+   },
+   "rss_mb": {
+    "start": 11.58203125,
+    "peak": 26.1953125,
+    "end": 26.1875
+   },
+   "pass": true
+  },
+  {
+   "server": "rzmqzc-uring",
+   "alive": true,
+   "churn": {
+    "conns": 587,
+    "errors": 0,
+    "aborted": 306,
+    "huge": 21
+   },
+   "xbench": {
+    "sent": 62211,
+    "received": 62211,
+    "bad": 0,
+    "msgs_s": 2073.7,
+    "first_error": ""
+   },
+   "rss_mb": {
+    "start": 11.46875,
+    "peak": 24.2890625,
+    "end": 20.7578125
+   },
+   "pass": true
+  }
+ ],
+ "note": "runs[0..2]: earlier patch revision (header probe); runs[3]: final patches (whole-message prediction)"
+}

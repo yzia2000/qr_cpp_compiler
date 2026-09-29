@@ -5,7 +5,7 @@ import statistics
 import sys
 from collections import defaultdict
 
-SERVER_ORDER = ["libzmq-c", "rust-zmq", "omq-tokio", "omq-tokio+slotcap64M", "omq-hardened", "omq-c", "zeromq", "rzmq-tokio", "rzmq-tokio-nothrottle", "rzmq-uring", "rzmq-uring-w2", "rzmq-uring-w2-perf", "rzmq-uring-zc", "rzmq-uring-zc-w2", "rzmq-uring-zc-w2-drop", "rzmq-uring-w2-cork", "rzmq-uring-sqpoll", "rzmq-uring-max"]
+SERVER_ORDER = ["libzmq-c", "rust-zmq", "omq-tokio", "omq-tokio+slotcap64M", "omq-hardened", "omq-c", "zeromq", "rzmq-tokio", "rzmq-tokio-nothrottle", "rzmq-uring", "rzmq-uring-w2", "rzmq-uring-w2-perf", "rzmq-uring-zc", "rzmq-uring-zc-w2", "rzmq-uring-zc-w2-drop", "rzmq-uring-w2-cork", "rzmq-uring-sqpoll", "rzmq-uring-max", "rzmqzc-tokio", "rzmqzc-uring-nodirect", "rzmqzc-uring", "rzmqzc-uring-zc"]
 SIZE_ORDER = ["100KB", "256KB", "512KB", "1MB"]
 
 

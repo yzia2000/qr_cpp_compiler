@@ -15,6 +15,11 @@ tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "time", 
 bytes = "1"
 rzmq = { version = "=0.5.26", features = ["io-uring"] }  # pure-Rust ZeroMQ with io_uring (Linux)
 
+[features]
+# Flags for options that only the patched rzmq has; enabled by rzmq_zc/server, which builds
+# rzmq_proxy.rs against rzmq 0.5.26 + rzmq_zc/patches. Off here (stock crates.io rzmq).
+rzmq-zc = []
+
 [[bin]]
 name = "omq_proxy"
 path = "src/bin/omq_proxy.rs"
