@@ -15,6 +15,7 @@ Compared against:
 | `omq-hardened` | native, `io_threads=2` + `slot_cap=64 MiB` + `max_message_size=16 MiB`, subscribe-all + drain | C1+C2+C3 workarounds |
 | `omq-c` | the **same C server source** linked against `libomq_zmq.so` (omq's libzmq drop-in) | reports itself as libzmq 4.3.6 |
 | `zeromq` | zmq.rs (`zeromq` crate 0.6.0) | the other pure-Rust implementation |
+| `rzmq-*` | rzmq 0.5.26, Tokio or io_uring backend | no XPUB/XSUB: subscribe-all SUB→PUB forwarder ([addendum](#addendum-rzmq-0526-and-does-io_uring-make-it-faster)) |
 
 ## Verdict
 
@@ -47,6 +48,12 @@ substitute for an untrusted-facing or semantics-sensitive XPUB/XSUB broker.
 For comparison, the other pure-Rust implementation (zmq.rs / `zeromq` 0.6.0) was **worse**: it could
 not carry ≥100 KB through this proxy pattern at all, and its process aborted on 512 KB–1 MB frames.
 omq is well ahead of zmq.rs; it is not yet at libzmq's level for this use case.
+
+**rzmq (io_uring) was added later** — see the [addendum](#addendum-rzmq-0526-and-does-io_uring-make-it-faster).
+In short: io_uring makes rzmq fast at ~100 KB (at or above libzmq) but not at 256 KB–1 MB, where
+libzmq on plain epoll stays ~1.6× ahead; rzmq has no XPUB/XSUB at all, and its PUB blocks on a slow
+subscriber by default. (omq itself does not use io_uring; its io_uring backend was removed in July
+2026, so io_uring plays no part in the omq-vs-libzmq gap.)
 
 
 ## Findings at a glance
@@ -521,6 +528,140 @@ knobs are set. Default `omq-tokio` dropped 31% (C3). None of the servers crashed
 unboundedly over this window — the H2–H5 liveness failures need the specific triggers (a stalled
 peer, >64 events per poll, 10k+ topics), not ordinary churn.
 
+
+## Addendum: rzmq 0.5.26, and does io_uring make it faster?
+
+### Short answer
+
+* **io_uring is not why libzmq beat omq — neither uses it.** omq-tokio runs on Tokio's epoll
+  reactor; omq's io_uring backend (`omq-compio`) was *removed* in the 2026-07-10 release
+  (`omq.rs/CHANGELOG.md:363-366`). libzmq is epoll too.
+* **rzmq really does use io_uring** (verified below), and it helps **only at the small end of this
+  range**: at 100 KB it lifts rzmq's throughput +36–50% (to libzmq parity), gives the best 100 KB
+  latency of anything tested (121 µs p50), and the best 4-way fan-out (+45% over libzmq). **From
+  256 KB up it buys nothing**: libzmq on plain epoll is ~1.6× faster than rzmq's best configuration
+  at 256 KB–1 MB, and rzmq's *default* io_uring setup is slower than its own Tokio mode at 1 MB.
+* **rzmq cannot be an XPUB/XSUB broker.** It has no XPUB/XSUB socket types and no proxy function
+  (its README: "No built-in high-level proxy function"). The closest it can do is a subscribe-all
+  SUB→PUB forwarder — the same shape as `omq-hardened`, with the same loss of upstream subscription
+  propagation.
+
+### How it was tested
+
+* rzmq 0.5.26 (crates.io, 2026-09-27) with the `io-uring` feature; server
+  `servers/src/bin/rzmq_proxy.rs`: SUB bound on the publisher side subscribing to everything, PUB
+  bound on the subscriber side (rzmq filters publisher-side), whole-message
+  `recv_multipart`/`send_multipart` loop. Same independent `xbench` client and conformance suite.
+* Variants: `rzmq-tokio` (library defaults); `rzmq-uring` (io_uring sessions + multishot receive,
+  adaptive throttle off — how rzmq's own benchmark configures it); `rzmq-uring-zc-w2` (+ zero-copy
+  send, 2 io_uring workers — the best all-rounder from the sweep); `rzmq-uring-zc-w2-drop` (same, PUB
+  `SNDTIMEO=0`).
+* **io_uring was verified to be carrying the data.** With strace and per-thread CPU during 1 MB
+  traffic: in io_uring modes the sockets are driven by `io_uring_enter` on the `rzmq-io-uring-w`
+  thread with no `recvfrom`/`writev` at all; in Tokio mode it is `recvfrom`/`writev`/`epoll_wait` on
+  the Tokio workers. io_uring is enabled on this kernel (`io_uring_setup` succeeds, no seccomp).
+* libzmq and omq-hardened were **re-baselined in the same session** (the container was recycled
+  between runs and the host came back 5–15% faster depending on size, so the tables below are not
+  mixed with the earlier ones). Medians of 3 runs for throughput/latency, 2 for the rest.
+
+### Tuning sweep (8 in flight, 1 subscriber, 1 run each)
+
+| rzmq config | 100 KB msg/s | 1 MB msg/s | server CPU |
+|---|---|---|---|
+| Tokio (defaults) | 10,653 | 2,084 | ~95–120% |
+| io_uring, 1 worker (rzmq default count) | **17,317** | 1,490 | ~100% (worker pegged) |
+| io_uring, 2 workers | 15,149 | 1,868 | ~80–130% |
+| io_uring + zero-copy, 2 workers | 16,094 | 1,989 | ~100–130% |
+| io_uring + SQPOLL | 17,205 | 1,993 | 160–190% |
+| io_uring, 2 workers, busy-poll strategy | 11,474 | 1,956 | ~190% |
+| "everything on" (ZC + SQPOLL + busy-poll) | **1,008** | 804 | 324–346% |
+
+On a 4-vCPU box the spinning options oversubscribe the CPUs the client also needs; "everything on"
+collapsed.
+
+### Results vs libzmq and omq (same session)
+
+**Throughput, 8 in flight, 1 subscriber (msg/s):**
+
+| size | libzmq | omq-hardened | rzmq Tokio | rzmq io_uring | rzmq io_uring+ZC, 2w |
+|---|---|---|---|---|---|
+| 100 KB | 17,572 | 15,874 | 11,598 | 15,735 | **17,413** |
+| 256 KB | **10,698** | 7,470 | 6,697 | 6,648 | 6,825 |
+| 512 KB | **6,260** | 4,296 | 3,167 | 3,175 | 3,789 |
+| 1 MB | **3,274** | 2,300 | 1,991 | 1,516 | 1,993 |
+
+**Round-trip latency, 1 in flight (p50 / p99 µs):**
+
+| size | libzmq | omq-hardened | rzmq Tokio | rzmq io_uring |
+|---|---|---|---|---|
+| 100 KB | 146 / 222 | 151 / 228 | 142 / 226 | **121 / 194** |
+| 256 KB | 183 / 277 | 184 / 282 | 242 / 522 | 181 / 308 |
+| 512 KB | **262 / 479** | 267 / 441 | 336 / 961 | 384 / 576 |
+| 1 MB | **435 / 700** | 681 / 966 | 784 / 1,686 | 728 / 1,052 |
+
+io_uring clearly tightens rzmq's tails (1 MB p99 1,686 → 1,052 µs) but doesn't close the gap to
+libzmq above 256 KB.
+
+**Fan-out to 4 subscribers, 8 in flight (msg/s per subscriber, 0% loss for all):**
+
+| size | libzmq | omq-hardened | rzmq Tokio | rzmq io_uring | rzmq io_uring+ZC, 2w |
+|---|---|---|---|---|---|
+| 100 KB | ~6,830 | ~8,200 | ~6,780 | ~8,400 | **~9,900** |
+| 1 MB | ~1,200 | **~1,310** | ~1,050 | ~690 | ~1,070 |
+
+**Open-loop flood (msg/s delivered; loss):** at 100 KB rzmq Tokio delivered 24,209 msg/s with 0%
+loss vs libzmq 13,016 (≈0%) and omq-hardened 18,356 (35% loss) — rzmq's write batching shines when
+there is a deep queue to batch. At 1 MB: libzmq 3,006 (0%), rzmq io_uring+ZC 2,529 (0%), rzmq
+Tokio 2,395 (0%), omq-hardened 2,474 (22–34% loss), rzmq io_uring 1-worker 1,604.
+
+### Why io_uring doesn't help 100 KB–1 MB messages much here
+
+1. **Large messages are copy-bound, not syscall-bound.** A 1 MB message costs a handful of
+   syscalls but ~1 MB of memory copying at several points (kernel loopback copy, userspace
+   framing). io_uring removes syscall and context-switch overhead; it does not remove copies. At
+   100 KB the fixed per-message overhead is a bigger share, which is exactly where it helped.
+2. **rzmq's "zero-copy" send isn't zero-copy end to end.** It first copies each message into a
+   pre-registered send buffer (`io_uring_backend/worker/cqe_processor.rs:160-180`,
+   `acquire_and_prep_buffer` → `len_copied`) and then issues `SEND_ZC`; on loopback the kernel copies
+   again when it delivers to the local receiver.
+3. **One io_uring worker by default.** rzmq uses `ceil(ncpu/2) − 2`, minimum 1 → **1 worker** on
+   4 vCPUs. All connections funnel through it; it sat at 100% CPU at 1 MB while Tokio mode spread the
+   same work across two threads. A second worker recovers Tokio-level throughput, not more.
+4. **Cross-thread handoffs.** Socket logic runs on Tokio, I/O on the io_uring worker: ~2,600 futex
+   wake-ups/s at 1 MB.
+
+(Caveat: this is 4 vCPUs over loopback. With more cores and a real NIC, io_uring's syscall savings
+matter more for small messages; for 100 KB–1 MB they stay secondary to copying.)
+
+### rzmq production concerns for this use case
+
+* **No XPUB/XSUB, no proxy** → no upstream subscription propagation; publishers send everything to
+  the broker. Same trade-off as `omq-hardened`.
+* **Head-of-line blocking by default — the most important one.** rzmq's PUB, on a full subscriber
+  pipe, *awaits* instead of dropping (`SNDTIMEO` defaults to infinite: `sessionx/iface.rs:104-112`).
+  With one slow subscriber (5 ms/message) the **fast** subscriber fell from ~16–18k to **~195 msg/s
+  at 100 KB**, with multi-second p99 — every subscriber runs at the slowest one's pace. libzmq and
+  omq-hardened kept the fast subscriber at full speed.
+  **Fix: set `SNDTIMEO=0` on the PUB** (libzmq-style drop). Confirmed: 100 KB fast subscriber back
+  to 16,190 msg/s; at 1 MB it improves to 448 msg/s (vs 208 default) but stays far below
+  omq-hardened's 2,113, and ~575 MB is queued for the slow subscriber (libzmq: ~850 MB).
+* **Robustness is better than omq out of the box:** survives the C1 oversized-frame attack in both
+  modes; no livelock with 65 topics or 10 subscribers × 10 topics; **0% loss in every closed-loop
+  and flood run** (it blocks rather than drops); a stray data/empty/multipart frame from a subscriber
+  is ignored rather than killing the forwarder.
+* **Conformance: 15/21 in both modes** — the same 6 upstream-propagation scenarios `omq-hardened`
+  fails, all by design of a subscribe-all forwarder. Every data-delivery scenario passes, including
+  the 50 × 512 KiB burst (all delivered).
+* From its own docs: "Beta"; announces ZMTP 3.0 (interoperates with libzmq via legacy
+  `\x01topic` subscriptions); no ZAP; limited libzmq option parity; no `zmq_poll`/`zmq_proxy`.
+
+### Bottom line on rzmq
+
+rzmq + io_uring is genuinely fast for ~100 KB messages with healthy consumers (at or above libzmq,
+best-in-class latency and fan-out) and is more robust out of the box than omq. But for 256 KB–1 MB
+it is ~1.6× slower than libzmq whether or not io_uring is on, it cannot be a faithful XPUB/XSUB
+broker, and its default blocking PUB lets one slow subscriber stall everyone unless you set
+`SNDTIMEO=0`. It is not a drop-in replacement for a libzmq XPUB/XSUB broker either.
 
 ## If you must run omq for this today (native API)
 

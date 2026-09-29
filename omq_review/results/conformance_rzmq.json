@@ -1,0 +1,270 @@
+{
+ "rzmq-tokio": {
+  "basic_filtering": {
+   "status": "PASS",
+   "detail": "",
+   "server_alive": true,
+   "seconds": 0.54
+  },
+  "late_joining_publisher": {
+   "status": "PASS",
+   "detail": "",
+   "server_alive": true,
+   "seconds": 0.54
+  },
+  "shared_topic_one_unsubscribes": {
+   "status": "PASS",
+   "detail": "",
+   "server_alive": true,
+   "seconds": 1.86
+  },
+  "shared_topic_one_disconnects": {
+   "status": "PASS",
+   "detail": "",
+   "server_alive": true,
+   "seconds": 1.76
+  },
+  "upstream_cancel_on_unsubscribe": {
+   "status": "FAIL",
+   "detail": "subscribe never reached publisher: [b'\\x01']",
+   "server_alive": true,
+   "seconds": 3.01
+  },
+  "upstream_cancel_on_subscriber_disconnect": {
+   "status": "FAIL",
+   "detail": "subscribe never reached publisher: [b'\\x01']",
+   "server_alive": true,
+   "seconds": 3.01
+  },
+  "subscription_leak_under_churn": {
+   "status": "FAIL",
+   "detail": "1/50 subscriptions of disconnected subscribers still active upstream",
+   "server_alive": true,
+   "seconds": 103.08
+  },
+  "upstream_subscribe_dedup": {
+   "status": "FAIL",
+   "detail": "0 upstream SUBSCRIBE messages for one topic with 5 subscribers (libzmq: 1)",
+   "server_alive": true,
+   "seconds": 1.53
+  },
+  "multipart_integrity": {
+   "status": "PASS",
+   "detail": "",
+   "server_alive": true,
+   "seconds": 2.06
+  },
+  "xsub_client_sends_data_upstream": {
+   "status": "FAIL",
+   "detail": "upstream data message was not forwarded to publishers (libzmq forwards it)",
+   "server_alive": true,
+   "seconds": 1.16
+  },
+  "xsub_client_sends_empty_message": {
+   "status": "PASS",
+   "detail": "",
+   "server_alive": true,
+   "seconds": 0.86
+  },
+  "xsub_client_sends_multipart_subscribe": {
+   "status": "PASS",
+   "detail": "",
+   "server_alive": true,
+   "seconds": 0.86
+  },
+  "overlapping_prefixes": {
+   "status": "PASS",
+   "detail": "",
+   "server_alive": true,
+   "seconds": 1.66
+  },
+  "same_socket_double_subscribe": {
+   "status": "PASS",
+   "detail": "",
+   "server_alive": true,
+   "seconds": 1.64
+  },
+  "subscriber_with_65_topics": {
+   "idle_server_cpu_pct": 1,
+   "status": "PASS",
+   "detail": "",
+   "server_alive": true,
+   "seconds": 2.12
+  },
+  "subscription_storm_20k": {
+   "storm_upstream_s": 60.07,
+   "storm_forwarded": 1,
+   "status": "FAIL",
+   "detail": "only 1/20000 subscriptions reached the publisher within 60 s",
+   "server_alive": true,
+   "seconds": 60.38
+  },
+  "publisher_restart": {
+   "status": "PASS",
+   "detail": "",
+   "server_alive": true,
+   "seconds": 0.38
+  },
+  "burst_of_large_messages": {
+   "delivered": 50,
+   "status": "PASS",
+   "detail": "",
+   "server_alive": true,
+   "seconds": 3.06
+  },
+  "server_restart_recovery": {
+   "recovery_s": 0.19,
+   "status": "PASS",
+   "detail": "",
+   "server_alive": true,
+   "seconds": 0.24
+  },
+  "ten_subscribers_ten_topics_connect_together": {
+   "status": "PASS",
+   "detail": "",
+   "server_alive": true,
+   "seconds": 0.7
+  },
+  "restart_with_ten_subscribers_ten_topics": {
+   "recovery_s": 0.39,
+   "status": "PASS",
+   "detail": "",
+   "server_alive": true,
+   "seconds": 0.8
+  }
+ },
+ "rzmq-uring": {
+  "basic_filtering": {
+   "status": "PASS",
+   "detail": "",
+   "server_alive": true,
+   "seconds": 0.54
+  },
+  "late_joining_publisher": {
+   "status": "PASS",
+   "detail": "",
+   "server_alive": true,
+   "seconds": 0.54
+  },
+  "shared_topic_one_unsubscribes": {
+   "status": "PASS",
+   "detail": "",
+   "server_alive": true,
+   "seconds": 1.86
+  },
+  "shared_topic_one_disconnects": {
+   "status": "PASS",
+   "detail": "",
+   "server_alive": true,
+   "seconds": 1.76
+  },
+  "upstream_cancel_on_unsubscribe": {
+   "status": "FAIL",
+   "detail": "subscribe never reached publisher: [b'\\x01']",
+   "server_alive": true,
+   "seconds": 3.01
+  },
+  "upstream_cancel_on_subscriber_disconnect": {
+   "status": "FAIL",
+   "detail": "subscribe never reached publisher: [b'\\x01']",
+   "server_alive": true,
+   "seconds": 3.01
+  },
+  "subscription_leak_under_churn": {
+   "status": "FAIL",
+   "detail": "1/50 subscriptions of disconnected subscribers still active upstream",
+   "server_alive": true,
+   "seconds": 103.14
+  },
+  "upstream_subscribe_dedup": {
+   "status": "FAIL",
+   "detail": "0 upstream SUBSCRIBE messages for one topic with 5 subscribers (libzmq: 1)",
+   "server_alive": true,
+   "seconds": 1.53
+  },
+  "multipart_integrity": {
+   "status": "PASS",
+   "detail": "",
+   "server_alive": true,
+   "seconds": 2.06
+  },
+  "xsub_client_sends_data_upstream": {
+   "status": "FAIL",
+   "detail": "upstream data message was not forwarded to publishers (libzmq forwards it)",
+   "server_alive": true,
+   "seconds": 1.16
+  },
+  "xsub_client_sends_empty_message": {
+   "status": "PASS",
+   "detail": "",
+   "server_alive": true,
+   "seconds": 0.86
+  },
+  "xsub_client_sends_multipart_subscribe": {
+   "status": "PASS",
+   "detail": "",
+   "server_alive": true,
+   "seconds": 0.86
+  },
+  "overlapping_prefixes": {
+   "status": "PASS",
+   "detail": "",
+   "server_alive": true,
+   "seconds": 1.66
+  },
+  "same_socket_double_subscribe": {
+   "status": "PASS",
+   "detail": "",
+   "server_alive": true,
+   "seconds": 1.64
+  },
+  "subscriber_with_65_topics": {
+   "idle_server_cpu_pct": 0,
+   "status": "PASS",
+   "detail": "",
+   "server_alive": true,
+   "seconds": 2.12
+  },
+  "subscription_storm_20k": {
+   "storm_upstream_s": 60.07,
+   "storm_forwarded": 1,
+   "status": "FAIL",
+   "detail": "only 1/20000 subscriptions reached the publisher within 60 s",
+   "server_alive": true,
+   "seconds": 60.37
+  },
+  "publisher_restart": {
+   "status": "PASS",
+   "detail": "",
+   "server_alive": true,
+   "seconds": 0.38
+  },
+  "burst_of_large_messages": {
+   "delivered": 50,
+   "status": "PASS",
+   "detail": "",
+   "server_alive": true,
+   "seconds": 3.07
+  },
+  "server_restart_recovery": {
+   "recovery_s": 0.14,
+   "status": "PASS",
+   "detail": "",
+   "server_alive": true,
+   "seconds": 0.19
+  },
+  "ten_subscribers_ten_topics_connect_together": {
+   "status": "PASS",
+   "detail": "",
+   "server_alive": true,
+   "seconds": 0.7
+  },
+  "restart_with_ten_subscribers_ten_topics": {
+   "recovery_s": 0.41,
+   "status": "PASS",
+   "detail": "",
+   "server_alive": true,
+   "seconds": 0.82
+  }
+ }
+}

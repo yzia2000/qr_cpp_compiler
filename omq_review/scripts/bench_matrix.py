@@ -33,6 +33,23 @@ SERVERS = {
     "omq-hardened": [f"{XTGT}/omq_proxy_hardened"],
     "omq-c": [f"{XBIN}/xproxy_omqc"],
     "zeromq": [f"{XTGT}/zeromq_proxy"],
+    # rzmq 0.5.26: no XPUB/XSUB, so a subscribe-all SUB->PUB forwarder (servers/src/bin/rzmq_proxy.rs)
+    "rzmq-tokio": [f"{XTGT}/rzmq_proxy", "--mode", "tokio"],
+    "rzmq-tokio-nothrottle": [f"{XTGT}/rzmq_proxy", "--mode", "tokio", "--throttle", "off"],
+    "rzmq-uring": [f"{XTGT}/rzmq_proxy", "--mode", "uring", "--throttle", "off"],
+    "rzmq-uring-w2": [f"{XTGT}/rzmq_proxy", "--mode", "uring", "--workers", "2", "--throttle", "off"],
+    "rzmq-uring-w2-perf": [f"{XTGT}/rzmq_proxy", "--mode", "uring", "--workers", "2", "--strategy",
+                           "performance", "--throttle", "off"],
+    "rzmq-uring-zc": [f"{XTGT}/rzmq_proxy", "--mode", "uring-zc", "--throttle", "off"],
+    "rzmq-uring-zc-w2": [f"{XTGT}/rzmq_proxy", "--mode", "uring-zc", "--workers", "2", "--throttle", "off"],
+    # same as rzmq-uring-zc-w2 but PUB SNDTIMEO=0: drop on a full subscriber (libzmq PUB semantics)
+    "rzmq-uring-zc-w2-drop": [f"{XTGT}/rzmq_proxy", "--mode", "uring-zc", "--workers", "2", "--throttle",
+                              "off", "--sndtimeo", "0"],
+    "rzmq-uring-w2-cork": [f"{XTGT}/rzmq_proxy", "--mode", "uring", "--workers", "2", "--cork",
+                           "--throttle", "off"],
+    "rzmq-uring-sqpoll": [f"{XTGT}/rzmq_proxy", "--mode", "uring", "--sqpoll", "--throttle", "off"],
+    "rzmq-uring-max": [f"{XTGT}/rzmq_proxy", "--mode", "uring-zc", "--workers", "2", "--sqpoll",
+                       "--strategy", "performance", "--throttle", "off"],
 }
 SIZES = {"100KB": 102400, "256KB": 262144, "512KB": 524288, "1MB": 1048576}
 TESTS = {

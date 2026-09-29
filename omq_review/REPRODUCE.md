@@ -74,6 +74,29 @@ python3 omq_review/scripts/bench_matrix.py --tests tput,pingpong,fanout4,slowsub
 python3 omq_review/scripts/summarize.py omq_review/results/bench.jsonl
 ```
 
+## rzmq / io_uring addendum
+
+```sh
+# rzmq_proxy is built with the servers crate (rzmq 0.5.26, feature "io-uring"). Modes:
+#   --mode tokio | uring | uring-zc   [--workers N] [--sqpoll] [--strategy performance|balanced|low_power]
+#   [--cork] [--throttle on|off] [--sndtimeo MS]   (SNDTIMEO=0 => drop on a full subscriber)
+# Needs a kernel with io_uring enabled (cat /proc/sys/kernel/io_uring_disabled -> 0).
+
+# tuning sweep, then the same-session comparison vs libzmq and omq-hardened:
+python3 scripts/bench_matrix.py --tests tput --sizes 100KB,1MB --reps 1 --duration 3 \
+  --servers rzmq-tokio,rzmq-uring,rzmq-uring-w2,rzmq-uring-zc-w2,rzmq-uring-sqpoll,rzmq-uring-max \
+  --out results/rzmq_sweep.jsonl
+python3 scripts/bench_matrix.py --tests tput,pingpong --reps 3 --duration 4 \
+  --servers libzmq-c,omq-hardened,rzmq-tokio,rzmq-uring,rzmq-uring-zc-w2 --out results/bench_rzmq.jsonl
+python3 scripts/bench_matrix.py --tests fanout4,slowsub,flood --sizes 100KB,1MB --reps 2 --duration 4 \
+  --servers libzmq-c,omq-hardened,rzmq-tokio,rzmq-uring,rzmq-uring-zc-w2 --out results/bench_rzmq.jsonl
+python3 scripts/summarize.py results/bench_rzmq.jsonl
+python3 scenarios/conformance.py --servers rzmq-tokio,rzmq-uring --json results/conformance_rzmq.json
+
+# confirm io_uring is carrying the data (io_uring_enter on rzmq-io-uring-w, no recvfrom/writev):
+strace -f -c -p <rzmq_proxy pid>   # while xbench runs
+```
+
 ## Files
 
 - `servers/` — the four Rust proxy servers (one CLI). `omq_proxy` exposes `--io-threads`, `--hwm`,

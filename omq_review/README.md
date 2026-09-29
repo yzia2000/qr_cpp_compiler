@@ -12,7 +12,7 @@ Layout:
 
 | dir | what |
 |---|---|
-| `servers/` | four XSUB/XPUB proxy servers (omq native, omq hardened, rust-zmq, zmq.rs), one CLI |
+| `servers/` | XSUB/XPUB proxy servers (omq native, omq hardened, rust-zmq, zmq.rs) plus an rzmq SUB→PUB forwarder (Tokio or io_uring), one CLI |
 | `c_proxy/` | libzmq C-API proxy, built against system libzmq and against omq's `libomq_zmq.so` |
 | `client/` | `xbench.cpp` — independent libzmq load generator + byte-for-byte verifier |
 | `scenarios/` | pyzmq/raw-socket conformance, churn soak, and ZMTP edge-case peers |
@@ -25,6 +25,12 @@ from one subscriber wedge it. Three option changes remove those three issues and
 ~1.4–2× of libzmq (and uses far less memory under slow consumers), but proxy-semantics divergence and
 several liveness/integrity gaps remain, and two of the fixes aren't reachable from the C API. Full
 detail and the nuances in [REPORT.md](REPORT.md).
+
+**Addendum — rzmq and io_uring:** rzmq 0.5.26 (the pure-Rust implementation with an io_uring
+backend) was benchmarked in the same harness. io_uring makes it fast at ~100 KB (at or above libzmq)
+but not at 256 KB–1 MB, where libzmq on plain epoll stays ~1.6× ahead; rzmq has no XPUB/XSUB, and its
+PUB blocks every subscriber behind a slow one unless `SNDTIMEO=0`. omq doesn't use io_uring at all.
+Details in the REPORT addendum.
 
 *This review was produced with LLM assistance; every "reproduced" finding was demonstrated with a
 running binary (commands in REPRODUCE.md), and code-only findings carry file:line references.*

@@ -33,6 +33,9 @@ SERVERS = {
     # user-side workarounds applied (see servers/src/bin/omq_proxy_hardened.rs)
     "omq-hardened": [f"{XTGT}/omq_proxy_hardened"],
     "zeromq": [f"{XTGT}/zeromq_proxy"],
+    # rzmq 0.5.26 has no XPUB/XSUB: subscribe-all SUB->PUB forwarder (servers/src/bin/rzmq_proxy.rs)
+    "rzmq-tokio": [f"{XTGT}/rzmq_proxy", "--mode", "tokio"],
+    "rzmq-uring": [f"{XTGT}/rzmq_proxy", "--mode", "uring", "--throttle", "off"],
 }
 
 
