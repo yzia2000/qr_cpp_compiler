@@ -35,6 +35,7 @@ struct Config {
     chunk: usize,
     direct: usize,
     drop_policy: bool,
+    inflight: usize,
     max_frame: u64,
 }
 
@@ -48,6 +49,7 @@ fn parse_args() -> Config {
         chunk: 256 << 10,
         direct: 64 << 10,
         drop_policy: false,
+        inflight: 2,
         max_frame: 64 << 20,
     };
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -63,6 +65,7 @@ fn parse_args() -> Config {
             "--chunk-kb" => c.chunk = v.parse::<usize>().expect("KB") << 10,
             "--direct-kb" => c.direct = v.parse::<usize>().expect("KB") << 10,
             "--policy" => c.drop_policy = v == "drop",
+            "--inflight" => c.inflight = v.parse::<usize>().expect("count").max(1),
             other => panic!("unknown argument {other}"),
         }
         i += 2;
@@ -257,7 +260,7 @@ struct Conn {
     // send side
     outq: VecDeque<Out>,
     front_off: usize,
-    send_inflight: bool,
+    send_inflight: usize,
     queued_bytes: usize,
     notif_bytes: usize,
     // subscriber state
@@ -275,7 +278,7 @@ enum Op {
 struct Stats {
     msgs_in: u64,
     bytes_in: u64,
-    frames_out: u64,
+    sends: u64,
     bytes_out: u64,
     dropped: u64,
     notifs: u64,
@@ -371,7 +374,7 @@ impl Bridge {
             targets: Vec::new(),
             outq: VecDeque::new(),
             front_off: 0,
-            send_inflight: false,
+            send_inflight: 0,
             queued_bytes: 0,
             notif_bytes: 0,
             prefixes: Vec::new(),
@@ -734,44 +737,70 @@ impl Bridge {
         let c = self.conn(id);
         c.queued_bytes += item.len();
         c.outq.push_back(item);
-        if !c.send_inflight {
+        if c.send_inflight == 0 {
             self.post_send(id);
         }
     }
 
+    /// Submits up to `--inflight` sends for this peer as one linked chain.
+    ///
+    /// Two independent sends on one TCP socket may interleave if the first is
+    /// only partly written, so the chain is ordered with IOSQE_IO_LINK and
+    /// each send carries MSG_WAITALL: it completes whole or fails, and a
+    /// failure cancels the rest of the chain. A new chain is only started
+    /// once the previous one has fully completed.
     fn post_send(&mut self, id: usize) {
         let zc = self.cfg.zc;
+        let k = self.cfg.inflight;
         let c = self.conn(id);
-        if c.dead || c.send_inflight || c.outq.is_empty() {
+        if c.dead || c.send_inflight > 0 || c.outq.is_empty() {
             return;
         }
-        let mut iov = Vec::with_capacity(MAX_IOV + 3);
-        let mut items = Vec::new();
-        let mut total = 0;
-        let mut skip = c.front_off;
-        for item in c.outq.iter() {
-            if iov.len() + 3 > MAX_IOV || total >= MAX_SEND_BYTES {
-                break;
-            }
-            let before = iov.len();
-            item.iovecs(skip, &mut iov);
-            total += iov[before..].iter().map(|v| v.iov_len).sum::<usize>();
-            skip = 0;
-            items.push(item.clone());
-        }
-        let mut msg: Box<libc::msghdr> = Box::new(unsafe { std::mem::zeroed() });
-        msg.msg_iov = iov.as_mut_ptr();
-        msg.msg_iovlen = iov.len();
         let fd = c.fd;
-        c.send_inflight = true;
-        c.ops += 1;
-        let sqe = if zc {
-            opcode::SendMsgZc::new(types::Fd(fd), &*msg).ioprio(IORING_SEND_ZC_REPORT_USAGE).flags(libc::MSG_NOSIGNAL as u32).build()
-        } else {
-            opcode::SendMsg::new(types::Fd(fd), &*msg).flags(libc::MSG_NOSIGNAL as u32).build()
+        let mut chain = Vec::with_capacity(k);
+        let mut idx = 0;
+        let mut skip = c.front_off;
+        while chain.len() < k && idx < c.outq.len() {
+            let mut iov = Vec::with_capacity(MAX_IOV + 3);
+            let mut items = Vec::new();
+            let mut total = 0;
+            while idx < c.outq.len() && iov.len() + 3 <= MAX_IOV && total < MAX_SEND_BYTES {
+                let item = &c.outq[idx];
+                let before = iov.len();
+                item.iovecs(skip, &mut iov);
+                total += iov[before..].iter().map(|v| v.iov_len).sum::<usize>();
+                skip = 0;
+                items.push(item.clone());
+                idx += 1;
+            }
+            let mut msg: Box<libc::msghdr> = Box::new(unsafe { std::mem::zeroed() });
+            msg.msg_iov = iov.as_mut_ptr();
+            msg.msg_iovlen = iov.len();
+            let flags = (libc::MSG_NOSIGNAL | libc::MSG_WAITALL) as u32;
+            let sqe = if zc {
+                opcode::SendMsgZc::new(types::Fd(fd), &*msg).ioprio(IORING_SEND_ZC_REPORT_USAGE).flags(flags).build()
+            } else {
+                opcode::SendMsg::new(types::Fd(fd), &*msg).flags(flags).build()
+            };
+            chain.push((sqe, Op::Send { conn: id, items, _iov: iov, _msg: msg, total }));
+        }
+        let n = chain.len();
+        c.send_inflight = n;
+        c.ops += n;
+        // A chain must not straddle two submits, or the kernel ends it early.
+        let free = {
+            let sq = self.ring.submission();
+            sq.capacity() - sq.len()
         };
-        let ud = self.op(Op::Send { conn: id, items, _iov: iov, _msg: msg, total });
-        self.push(sqe.user_data(ud));
+        if free < n {
+            self.ring.submit().expect("submit");
+        }
+        for (i, (sqe, op)) in chain.into_iter().enumerate() {
+            let ud = self.op(op);
+            let sqe = if i + 1 < n { sqe.flags(squeue::Flags::IO_LINK) } else { sqe };
+            self.push(sqe.user_data(ud));
+        }
+        self.stats.sends += n as u64;
     }
 
     fn on_send(&mut self, ud: u64, res: i32, flags: u32) {
@@ -780,12 +809,13 @@ impl Bridge {
         };
         let notif_pending = self.cfg.zc && cqueue::more(flags);
         let sent = res.max(0) as usize;
-        {
+        let chain_done = {
             let c = self.conn(id);
-            c.send_inflight = false;
+            c.send_inflight -= 1;
             c.ops -= 1;
-            // Advance the queue by what the kernel took.
-            let mut left = sent;
+            // Chain members complete in order, so the queue advances in order.
+            // A dead connection's queue was already cleared by `kill`.
+            let mut left = if c.dead { 0 } else { sent };
             while left > 0 {
                 let front_len = c.outq.front().expect("queued").len() - c.front_off;
                 if left >= front_len {
@@ -797,30 +827,35 @@ impl Bridge {
                     left = 0;
                 }
             }
-            c.queued_bytes -= sent;
+            if !c.dead {
+                c.queued_bytes -= sent;
+            }
             if notif_pending {
                 c.notif_bytes += sent;
                 c.ops += 1;
             }
-        }
+            c.send_inflight == 0
+        };
         if notif_pending {
             // Keep every buffer this send referenced alive until the kernel says so.
             self.ops[ud as usize] = Some(Op::Notif { conn: id, _items: items, bytes: sent });
         } else {
             self.free_ops.push(ud as usize);
         }
-        if sent > 0 {
-            self.stats.bytes_out += sent as u64;
-            self.stats.frames_out += 1;
-        }
+        self.stats.bytes_out += sent as u64;
         if self.conn(id).dead {
             return self.reap(id);
         }
-        if res < 0 && -res != libc::EAGAIN && -res != libc::ENOBUFS && -res != libc::EINTR {
+        // -ECANCELED is a later chain member after an earlier one stopped
+        // short; it sent nothing, and the queue resumes from where it stands.
+        let transient = [libc::EAGAIN, libc::ENOBUFS, libc::EINTR, libc::ECANCELED];
+        if res < 0 && !transient.contains(&-res) {
             return self.kill(id, &format!("send error {}", -res));
         }
         let _ = total;
-        self.post_send(id);
+        if chain_done {
+            self.post_send(id);
+        }
         self.resume_pubs();
     }
 
@@ -896,10 +931,11 @@ impl Bridge {
         let front = TcpListener::bind(&self.cfg.front).expect("bind front").into_raw_fd();
         let back = TcpListener::bind(&self.cfg.back).expect("bind back").into_raw_fd();
         eprintln!(
-            "[bridge] XSUB front {} / XPUB back {} | zc={} budget={}MB sub_cap={}MB chunk={}KB policy={}",
+            "[bridge] XSUB front {} / XPUB back {} | zc={} inflight={} budget={}MB sub_cap={}MB chunk={}KB policy={}",
             self.cfg.front,
             self.cfg.back,
             self.cfg.zc,
+            self.cfg.inflight,
             self.cfg.budget >> 20,
             self.cfg.sub_cap >> 20,
             self.cfg.chunk >> 10,
@@ -942,10 +978,11 @@ impl Bridge {
                 let s = &self.stats;
                 let dt = last.elapsed().as_secs_f64();
                 eprintln!(
-                    "[bridge] in {:.0} MB/s | msgs_in {} out_bytes {} | live {} MB | dropped {} | zc notifs {} copied {} | pauses {}",
+                    "[bridge] in {:.0} MB/s | msgs_in {} out_bytes {} | avg send {} KB | live {} MB | dropped {} | zc notifs {} copied {} | pauses {}",
                     (s.bytes_in - last_bytes) as f64 / dt / 1e6,
                     s.msgs_in,
                     s.bytes_out,
+                    s.bytes_out / s.sends.max(1) / 1024,
                     live_bytes() >> 20,
                     s.dropped,
                     s.notifs,

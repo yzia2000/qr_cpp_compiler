@@ -21,8 +21,10 @@ CONFIGS = {
     "libzmq zmq_proxy": [os.path.join(HERE, "zproxy"), FRONT, BACK],
     "libzmq zmq_proxy hwm=0": [os.path.join(HERE, "zproxy"), FRONT, BACK, "0"],
     "libzmq zmq_proxy io_threads=2": [os.path.join(HERE, "zproxy"), FRONT, BACK, "1000", "2"],
-    "uring bridge (copy)": [BRIDGE, "--zc", "off"],
-    "uring bridge (zc)": [BRIDGE, "--zc", "on"],
+    "uring bridge (copy)": [BRIDGE, "--zc", "off", "--inflight", "1"],
+    "uring bridge (zc)": [BRIDGE, "--zc", "on", "--inflight", "1"],
+    "uring bridge (copy, 2 in flight)": [BRIDGE, "--zc", "off", "--inflight", "2"],
+    "uring bridge (zc, 2 in flight)": [BRIDGE, "--zc", "on", "--inflight", "2"],
 }
 
 def cpu_secs(pid):
