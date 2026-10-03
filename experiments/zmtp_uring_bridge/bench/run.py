@@ -25,6 +25,12 @@ CONFIGS = {
     "uring bridge (zc)": [BRIDGE, "--zc", "on", "--inflight", "1"],
     "uring bridge (copy, 2 in flight)": [BRIDGE, "--zc", "off", "--inflight", "2"],
     "uring bridge (zc, 2 in flight)": [BRIDGE, "--zc", "on", "--inflight", "2"],
+    "chunk recv": [BRIDGE, "--zc", "off", "--recv", "chunk"],
+    "ring, 1 recv": [BRIDGE, "--zc", "off", "--recv", "ring", "--recvs", "1"],
+    "ring, 2 recvs": [BRIDGE, "--zc", "off", "--recv", "ring", "--recvs", "2"],
+    "ring, 2 recvs, 256K bufs": [BRIDGE, "--zc", "off", "--recv", "ring", "--recvs", "2", "--ring-buf-kb", "256", "--ring-entries", "256"],
+    "ring multishot": [BRIDGE, "--zc", "off", "--recv", "multishot"],
+    "ring, 2 recvs (zc)": [BRIDGE, "--zc", "on", "--recv", "ring", "--recvs", "2"],
 }
 
 def cpu_secs(pid):

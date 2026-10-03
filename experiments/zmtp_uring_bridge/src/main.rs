@@ -4,8 +4,11 @@
 //! back (we are XPUB). Subscriptions flow back-to-front, messages front-to-back.
 //!
 //! What replaces libzmq's HWM / SNDBUF / RCVBUF here:
-//! * received bytes land in refcounted chunks and are forwarded by reference
-//!   (header iovec + body iovecs) - no userspace copy on the data path;
+//! * received bytes land in refcounted buffers and are forwarded by reference
+//!   (header iovec + body iovecs) - no userspace copy on the data path. With
+//!   `--recv ring` (default) or `--recv multishot` those buffers come from a
+//!   kernel-provided buffer ring, so the ring's size bounds receive memory
+//!   and an empty ring is the backpressure signal (-ENOBUFS);
 //! * outbound frames are sent with IORING_OP_SENDMSG_ZC, so a buffer stays
 //!   pinned until the kernel's notification CQE arrives;
 //! * the only bound is bytes: a global budget for all live buffers, and a
@@ -18,12 +21,23 @@ use std::collections::{HashMap, VecDeque};
 use std::net::TcpListener;
 use std::os::fd::{IntoRawFd, RawFd};
 use std::rc::Rc;
+use std::sync::atomic::{AtomicU16, Ordering};
 use std::time::{Duration, Instant};
 
 use io_uring::{cqueue, opcode, squeue, types, IoUring};
 use weida_zmtp::{frame, Command, FrameKind, Greeting, Mechanism, Metadata, SocketType, GREETING_LEN};
 
 // ---------------------------------------------------------------- config
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum RecvMode {
+    /// One plain recv per peer into our own chunk / direct buffers.
+    Chunk,
+    /// `--recvs` concurrent recvs per peer, buffers picked from a provided ring.
+    Ring,
+    /// One multishot recv per peer, buffers picked from a provided ring.
+    Multishot,
+}
 
 #[derive(Clone)]
 struct Config {
@@ -37,6 +51,10 @@ struct Config {
     drop_policy: bool,
     inflight: usize,
     max_frame: u64,
+    recv_mode: RecvMode,
+    recvs: usize,
+    ring_buf: usize,
+    ring_entries: u16,
 }
 
 fn parse_args() -> Config {
@@ -51,6 +69,10 @@ fn parse_args() -> Config {
         drop_policy: false,
         inflight: 2,
         max_frame: 64 << 20,
+        recv_mode: RecvMode::Ring,
+        recvs: 2,
+        ring_buf: 64 << 10,
+        ring_entries: 1024,
     };
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut i = 0;
@@ -66,6 +88,17 @@ fn parse_args() -> Config {
             "--direct-kb" => c.direct = v.parse::<usize>().expect("KB") << 10,
             "--policy" => c.drop_policy = v == "drop",
             "--inflight" => c.inflight = v.parse::<usize>().expect("count").max(1),
+            "--recv" => {
+                c.recv_mode = match v.as_str() {
+                    "chunk" => RecvMode::Chunk,
+                    "ring" => RecvMode::Ring,
+                    "multishot" => RecvMode::Multishot,
+                    other => panic!("--recv chunk|ring|multishot, not {other}"),
+                }
+            }
+            "--recvs" => c.recvs = v.parse::<usize>().expect("count").max(1),
+            "--ring-buf-kb" => c.ring_buf = v.parse::<usize>().expect("KB") << 10,
+            "--ring-entries" => c.ring_entries = v.parse::<u16>().expect("power of two"),
             other => panic!("unknown argument {other}"),
         }
         i += 2;
@@ -78,6 +111,47 @@ fn parse_args() -> Config {
 thread_local! {
     static POOL: RefCell<HashMap<usize, Vec<Box<[u8]>>>> = RefCell::new(HashMap::new());
     static LIVE: Cell<usize> = const { Cell::new(0) };
+    static RING: RefCell<Option<PbufRing>> = const { RefCell::new(None) };
+}
+
+/// The provided-buffer ring (IORING_REGISTER_PBUF_RING, group 0) shared by
+/// every connection. The kernel takes buffers from the head as recvs complete;
+/// we put each one back at the tail when the last `Rc<Buf>` pointing into it
+/// drops, which for a zero-copy send means after its notification.
+struct PbufRing {
+    entries: *mut types::BufRingEntry,
+    mask: u16,
+    tail: u16,
+    base: *mut u8,
+    buf_size: usize,
+    count: usize,
+    in_use: usize,
+    /// Ring position each buffer id was last published at. The kernel
+    /// consumes positions in order, so per connection these must increase.
+    pos_of: Vec<u64>,
+    next_pos: u64,
+}
+
+impl PbufRing {
+    fn give(&mut self, bid: u16) {
+        let e = unsafe { &mut *self.entries.add(usize::from(self.tail & self.mask)) };
+        e.set_addr(self.base as u64 + u64::from(bid) * self.buf_size as u64);
+        e.set_len(self.buf_size as u32);
+        e.set_bid(bid);
+        self.pos_of[usize::from(bid)] = self.next_pos;
+        self.next_pos += 1;
+        self.tail = self.tail.wrapping_add(1);
+        let tail = unsafe { types::BufRingEntry::tail(self.entries) } as *const AtomicU16;
+        unsafe { (*tail).store(self.tail, Ordering::Release) };
+    }
+}
+
+fn ring_in_use() -> usize {
+    RING.with(|r| r.borrow().as_ref().map_or(0, |r| r.in_use))
+}
+
+fn ring_free() -> usize {
+    RING.with(|r| r.borrow().as_ref().map_or(0, |r| r.count - r.in_use))
 }
 
 /// A pooled, fixed-size buffer. Written through a raw pointer while other
@@ -85,6 +159,8 @@ thread_local! {
 struct Buf {
     ptr: *mut u8,
     cap: usize,
+    /// Set for a buffer that belongs to the provided-buffer ring.
+    bid: Option<u16>,
 }
 
 impl Buf {
@@ -95,7 +171,18 @@ impl Buf {
             .unwrap_or_else(|| vec![0u8; class].into_boxed_slice());
         LIVE.with(|l| l.set(l.get() + class));
         let ptr = Box::into_raw(mem) as *mut u8;
-        Rc::new(Buf { ptr, cap: class })
+        Rc::new(Buf { ptr, cap: class, bid: None })
+    }
+    /// Takes ownership of ring buffer `bid` the kernel just filled.
+    /// Returns the buffer and its ring position.
+    fn from_ring(bid: u16) -> (Rc<Buf>, u64) {
+        RING.with(|r| {
+            let mut r = r.borrow_mut();
+            let r = r.as_mut().expect("ring");
+            r.in_use += 1;
+            let ptr = unsafe { r.base.add(usize::from(bid) * r.buf_size) };
+            (Rc::new(Buf { ptr, cap: r.buf_size, bid: Some(bid) }), r.pos_of[usize::from(bid)])
+        })
     }
     fn cap(&self) -> usize {
         self.cap
@@ -110,6 +197,15 @@ impl Buf {
 
 impl Drop for Buf {
     fn drop(&mut self) {
+        if let Some(bid) = self.bid {
+            RING.with(|r| {
+                let mut r = r.borrow_mut();
+                let r = r.as_mut().expect("ring");
+                r.in_use -= 1;
+                r.give(bid);
+            });
+            return;
+        }
         let class = self.cap;
         let mem = unsafe { Box::from_raw(std::ptr::slice_from_raw_parts_mut(self.ptr, class)) };
         LIVE.with(|l| l.set(l.get() - class));
@@ -128,12 +224,15 @@ fn live_bytes() -> usize {
     LIVE.with(Cell::get)
 }
 
-/// One ZMTP frame to forward: our own header plus one or two body segments
-/// that point into received buffers. Never copied, only refcounted.
+type Seg = (Rc<Buf>, usize, usize);
+
+/// One ZMTP frame to forward: our own header plus the body segments that
+/// point into received buffers. Never copied, only refcounted.
 struct Frame {
     hdr: [u8; 9],
     hlen: usize,
-    segs: [(Option<Rc<Buf>>, usize, usize); 2],
+    len: usize,
+    segs: Vec<Seg>,
 }
 
 impl Frame {
@@ -142,10 +241,10 @@ impl Frame {
         frame::encode_header(FrameKind::Message { more }, len as u64, &mut v);
         let mut hdr = [0u8; 9];
         hdr[..v.len()].copy_from_slice(&v);
-        Frame { hdr, hlen: v.len(), segs: [(None, 0, 0), (None, 0, 0)] }
+        Frame { hdr, hlen: v.len(), len, segs: Vec::new() }
     }
     fn body_len(&self) -> usize {
-        self.segs[0].2 + self.segs[1].2
+        self.len
     }
     fn wire_len(&self) -> usize {
         self.hlen + self.body_len()
@@ -163,7 +262,6 @@ impl Frame {
             if rest.is_empty() {
                 break;
             }
-            let Some(buf) = buf else { continue };
             let n = rest.len().min(*len);
             if buf.slice(*off, n) != &rest[..n] {
                 return false;
@@ -187,6 +285,12 @@ impl Out {
             Out::Ctrl(v) => v.len(),
         }
     }
+    fn iov_count(&self) -> usize {
+        match self {
+            Out::Frame(f) => 1 + f.segs.len(),
+            Out::Ctrl(_) => 1,
+        }
+    }
     /// Appends iovecs for this item, skipping its first `skip` bytes.
     fn iovecs(&self, mut skip: usize, iov: &mut Vec<libc::iovec>) {
         let mut push = |ptr: *const u8, len: usize, skip: &mut usize| {
@@ -205,10 +309,8 @@ impl Out {
             Out::Frame(f) => {
                 push(f.hdr.as_ptr(), f.hlen, &mut skip);
                 for (b, off, len) in &f.segs {
-                    if let Some(b) = b {
-                        if *len > 0 {
-                            push(unsafe { b.ptr().add(*off) }, *len, &mut skip);
-                        }
+                    if *len > 0 {
+                        push(unsafe { b.ptr().add(*off) }, *len, &mut skip);
                     }
                 }
             }
@@ -253,7 +355,12 @@ struct Conn {
     start: usize,
     end: usize,
     direct: Option<Direct>,
-    recv_inflight: bool,
+    recvs: usize,
+    // receive side, ring modes: filled ring buffers not yet parsed
+    rx: VecDeque<Seg>,
+    rx_avail: usize,
+    starved: bool,
+    last_pos: u64,
     // multipart routing for publishers
     in_multipart: bool,
     targets: Vec<usize>,
@@ -267,9 +374,47 @@ struct Conn {
     prefixes: Vec<Vec<u8>>,
 }
 
+impl Conn {
+    /// Copies the first `n` unparsed bytes (headers, commands: small).
+    fn rx_copy(&self, n: usize) -> Vec<u8> {
+        let mut out = Vec::with_capacity(n);
+        for (b, off, len) in &self.rx {
+            let k = (n - out.len()).min(*len);
+            out.extend_from_slice(b.slice(*off, k));
+            if out.len() == n {
+                break;
+            }
+        }
+        out
+    }
+    /// Removes the first `n` unparsed bytes, returning them as segments.
+    fn rx_take(&mut self, mut n: usize, keep: bool) -> Vec<Seg> {
+        let mut segs = Vec::new();
+        self.rx_avail -= n;
+        while n > 0 {
+            let front = self.rx.front_mut().expect("rx_avail covers n");
+            if front.2 <= n {
+                n -= front.2;
+                let seg = self.rx.pop_front().expect("front");
+                if keep {
+                    segs.push(seg);
+                }
+            } else {
+                if keep {
+                    segs.push((front.0.clone(), front.1, n));
+                }
+                front.1 += n;
+                front.2 -= n;
+                n = 0;
+            }
+        }
+        segs
+    }
+}
+
 enum Op {
     Accept { role: Role, listener: RawFd },
-    Recv { conn: usize },
+    Recv { conn: usize, multishot: bool },
     Send { conn: usize, items: Vec<Out>, _iov: Vec<libc::iovec>, _msg: Box<libc::msghdr>, total: usize },
     Notif { conn: usize, _items: Vec<Out>, bytes: usize },
 }
@@ -284,6 +429,9 @@ struct Stats {
     notifs: u64,
     zc_copied: u64,
     paused: u64,
+    recvs: u64,
+    enobufs: u64,
+    reorders: u64,
 }
 
 struct Bridge {
@@ -297,7 +445,7 @@ struct Bridge {
     accept_addr: Box<(libc::sockaddr_storage, libc::socklen_t)>,
 }
 
-const MAX_IOV: usize = 96;
+const MAX_IOV: usize = 256;
 const MAX_SEND_BYTES: usize = 8 << 20;
 const IORING_SEND_ZC_REPORT_USAGE: u16 = 1 << 3;
 const IORING_NOTIF_USAGE_ZC_COPIED: i32 = 1 << 31;
@@ -309,6 +457,9 @@ impl Bridge {
             .setup_coop_taskrun()
             .build(4096)
             .expect("io_uring");
+        if cfg.recv_mode != RecvMode::Chunk {
+            Self::setup_pbuf_ring(&ring, &cfg);
+        }
         Bridge {
             cfg,
             ring,
@@ -318,6 +469,49 @@ impl Bridge {
             subs_union: HashMap::new(),
             stats: Stats::default(),
             accept_addr: Box::new((unsafe { std::mem::zeroed() }, 0)),
+        }
+    }
+
+    fn setup_pbuf_ring(ring: &IoUring, cfg: &Config) {
+        let n = usize::from(cfg.ring_entries);
+        assert!(n.is_power_of_two(), "--ring-entries must be a power of two");
+        let ring_bytes = (n * std::mem::size_of::<types::BufRingEntry>()).next_multiple_of(4096);
+        let entries = unsafe {
+            libc::mmap(
+                std::ptr::null_mut(),
+                ring_bytes,
+                libc::PROT_READ | libc::PROT_WRITE,
+                libc::MAP_ANONYMOUS | libc::MAP_PRIVATE,
+                -1,
+                0,
+            )
+        };
+        assert!(entries != libc::MAP_FAILED, "mmap buf ring");
+        let base = Box::leak(vec![0u8; n * cfg.ring_buf].into_boxed_slice()).as_mut_ptr();
+        unsafe { ring.submitter().register_buf_ring_with_flags(entries as u64, n as u16, 0, 0) }.expect("register_buf_ring");
+        let mut r = PbufRing {
+            entries: entries as *mut types::BufRingEntry,
+            mask: (n - 1) as u16,
+            tail: 0,
+            base,
+            buf_size: cfg.ring_buf,
+            count: n,
+            in_use: 0,
+            pos_of: vec![0; n],
+            next_pos: 0,
+        };
+        for bid in 0..n {
+            r.give(bid as u16);
+        }
+        RING.with(|slot| *slot.borrow_mut() = Some(r));
+    }
+
+    /// Largest frame we can accept: in ring modes a frame is held in ring
+    /// buffers until it is complete, so it must leave room for everyone else.
+    fn max_frame(&self) -> u64 {
+        match self.cfg.recv_mode {
+            RecvMode::Chunk => self.cfg.max_frame,
+            _ => self.cfg.max_frame.min((usize::from(self.cfg.ring_entries) * self.cfg.ring_buf / 4) as u64),
         }
     }
 
@@ -369,7 +563,11 @@ impl Bridge {
             start: 0,
             end: 0,
             direct: None,
-            recv_inflight: false,
+            recvs: 0,
+            rx: VecDeque::new(),
+            rx_avail: 0,
+            starved: false,
+            last_pos: 0,
             in_multipart: false,
             targets: Vec::new(),
             outq: VecDeque::new(),
@@ -414,12 +612,44 @@ impl Bridge {
     fn post_recv(&mut self, id: usize) {
         let throttle = self.conns[id].as_ref().is_some_and(|c| c.role == Role::Pub && c.phase == Phase::Traffic)
             && self.paused();
-        let chunk_size = self.cfg.chunk;
-        let c = self.conn(id);
-        if c.dead || c.recv_inflight {
+        if throttle || self.conns[id].as_ref().is_none_or(|c| c.dead) {
             return;
         }
-        if throttle {
+        match self.cfg.recv_mode {
+            RecvMode::Chunk => self.post_recv_chunk(id),
+            RecvMode::Ring => {
+                let (k, size) = (self.cfg.recvs, self.cfg.ring_buf);
+                while self.conn(id).recvs < k {
+                    let c = self.conn(id);
+                    c.recvs += 1;
+                    c.ops += 1;
+                    let fd = c.fd;
+                    let ud = self.op(Op::Recv { conn: id, multishot: false });
+                    let sqe = opcode::Recv::new(types::Fd(fd), std::ptr::null_mut(), size as u32)
+                        .buf_group(0)
+                        .build()
+                        .flags(squeue::Flags::BUFFER_SELECT)
+                        .user_data(ud);
+                    self.push(sqe);
+                }
+            }
+            RecvMode::Multishot => {
+                let c = self.conn(id);
+                if c.recvs == 0 {
+                    c.recvs = 1;
+                    c.ops += 1;
+                    let fd = c.fd;
+                    let ud = self.op(Op::Recv { conn: id, multishot: true });
+                    self.push(opcode::RecvMulti::new(types::Fd(fd), 0).build().user_data(ud));
+                }
+            }
+        }
+    }
+
+    fn post_recv_chunk(&mut self, id: usize) {
+        let chunk_size = self.cfg.chunk;
+        let c = self.conn(id);
+        if c.recvs > 0 {
             return;
         }
         let (ptr, len) = if let Some(d) = &c.direct {
@@ -446,29 +676,60 @@ impl Bridge {
             (unsafe { c.chunk.ptr().add(c.end) }, c.chunk.cap() - c.end)
         };
         let fd = c.fd;
-        c.recv_inflight = true;
+        c.recvs = 1;
         c.ops += 1;
-        let ud = self.op(Op::Recv { conn: id });
+        let ud = self.op(Op::Recv { conn: id, multishot: false });
         let sqe = opcode::Recv::new(types::Fd(fd), ptr, len.min(u32::MAX as usize) as u32).build().user_data(ud);
         self.push(sqe);
     }
 
-    fn on_recv(&mut self, id: usize, res: i32) {
+    fn on_recv(&mut self, id: usize, res: i32, flags: u32, armed: bool) {
+        self.stats.recvs += 1;
+        // Claim the ring buffer first, so that whatever happens next it goes
+        // back to the ring when dropped.
+        let filled = cqueue::buffer_select(flags).map(Buf::from_ring);
         {
             let c = self.conn(id);
-            c.recv_inflight = false;
-            c.ops -= 1;
+            if !armed {
+                c.recvs -= 1;
+                c.ops -= 1;
+            }
             if c.dead {
+                drop(filled);
                 return self.reap(id);
             }
         }
         if res <= 0 {
+            if res == -libc::ENOBUFS {
+                // The ring is empty: every buffer is held by frames still on
+                // their way out. Re-armed once buffers come back.
+                self.stats.enobufs += 1;
+                self.conn(id).starved = true;
+                return;
+            }
             if res == -libc::EAGAIN || res == -libc::EINTR {
                 return self.post_recv(id);
             }
             return self.kill(id, if res == 0 { "peer closed" } else { "recv error" });
         }
         let n = res as usize;
+        if let Some((buf, pos)) = filled {
+            let c = self.conn(id);
+            let reordered = pos < c.last_pos;
+            c.last_pos = pos;
+            c.rx.push_back((buf, 0, n));
+            c.rx_avail += n;
+            if reordered {
+                self.stats.reorders += 1;
+            }
+            if let Err(e) = self.parse_ring(id) {
+                return self.kill(id, &e);
+            }
+            if !armed && !self.conn(id).dead {
+                self.post_recv(id);
+            }
+            return;
+        }
         let done = {
             let c = self.conn(id);
             if let Some(d) = &mut c.direct {
@@ -482,7 +743,7 @@ impl Bridge {
         if done {
             let d = self.conn(id).direct.take().expect("direct");
             let mut f = d.frame;
-            f.segs[1] = (Some(d.buf), 0, d.want);
+            f.segs.push((d.buf, 0, d.want));
             self.route(id, f);
         }
         if let Err(e) = self.parse(id) {
@@ -522,7 +783,7 @@ impl Bridge {
                     self.enqueue(id, Out::Ctrl(Rc::new(ready)));
                 }
                 Phase::Handshake | Phase::Traffic => {
-                    let max = self.cfg.max_frame;
+                    let max = self.max_frame();
                     let direct_min = self.cfg.direct;
                     let chunk_size = self.cfg.chunk;
                     let c = self.conn(id);
@@ -552,7 +813,7 @@ impl Bridge {
                             }
                             let mut f = Frame::new(more, len);
                             if whole {
-                                f.segs[0] = (Some(c.chunk.clone()), c.start + hl, len);
+                                f.segs.push((c.chunk.clone(), c.start + hl, len));
                                 c.start += hl + len;
                                 self.route(id, f);
                             } else if len >= direct_min {
@@ -560,7 +821,9 @@ impl Bridge {
                                 // chunk as segment 0, recv the rest straight into
                                 // its own buffer as segment 1. No copy.
                                 let have = avail - hl;
-                                f.segs[0] = (Some(c.chunk.clone()), c.start + hl, have);
+                                if have > 0 {
+                                    f.segs.push((c.chunk.clone(), c.start + hl, have));
+                                }
                                 let want = len - have;
                                 c.direct = Some(Direct { frame: f, buf: Buf::alloc(want), filled: 0, want });
                                 c.start = c.end;
@@ -568,6 +831,68 @@ impl Bridge {
                             } else {
                                 return Ok(());
                             }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Parses whatever the ring buffers queued on this connection hold. A
+    /// message frame is only taken once complete, as a list of segments.
+    fn parse_ring(&mut self, id: usize) -> Result<(), String> {
+        let max = self.max_frame();
+        loop {
+            let c = self.conn(id);
+            if c.dead {
+                return Ok(());
+            }
+            let avail = c.rx_avail;
+            match c.phase {
+                Phase::Greeting => {
+                    if avail < GREETING_LEN {
+                        return Ok(());
+                    }
+                    let raw = c.rx_copy(GREETING_LEN);
+                    c.rx_take(GREETING_LEN, false);
+                    let role = c.role;
+                    let g = Greeting::decode(&raw).map_err(|e| format!("greeting: {e}"))?;
+                    let v = g.accept_downgrading(Mechanism::NULL).map_err(|e| format!("greeting: {e}"))?;
+                    let ours = if role == Role::Pub { SocketType::XSub } else { SocketType::XPub };
+                    let ready = Command::Ready(Metadata::new().with_socket_type(ours)).encode().map_err(|e| e.to_string())?;
+                    let c = self.conn(id);
+                    c.phase = Phase::Handshake;
+                    c.legacy_subs = v.minor < 1;
+                    self.enqueue(id, Out::Ctrl(Rc::new(ready)));
+                }
+                phase => {
+                    let head = c.rx_copy(avail.min(9));
+                    let (h, hl) = match frame::decode_header(&head, max) {
+                        Ok(x) => x,
+                        Err(e) if !e.is_violation() => return Ok(()),
+                        Err(e) => return Err(format!("frame: {e}")),
+                    };
+                    let len = h.len as usize;
+                    if hl + len > avail {
+                        if h.kind == FrameKind::Command && len > (1 << 20) {
+                            return Err("command over 1 MiB".into());
+                        }
+                        return Ok(());
+                    }
+                    c.rx_take(hl, false);
+                    match h.kind {
+                        FrameKind::Command => {
+                            let body = c.rx_copy(len);
+                            c.rx_take(len, false);
+                            self.on_command(id, &body)?;
+                        }
+                        FrameKind::Message { more } => {
+                            if phase == Phase::Handshake {
+                                return Err("message before READY".into());
+                            }
+                            let mut f = Frame::new(more, len);
+                            f.segs = c.rx_take(len, true);
+                            self.route(id, f);
                         }
                     }
                 }
@@ -683,9 +1008,7 @@ impl Bridge {
             if !f.more() && f.body_len() >= 1 {
                 let mut b = Vec::with_capacity(f.body_len());
                 for (buf, off, len) in &f.segs {
-                    if let Some(buf) = buf {
-                        b.extend_from_slice(buf.slice(*off, *len));
-                    }
+                    b.extend_from_slice(buf.slice(*off, *len));
                 }
                 if b[0] <= 1 {
                     self.subscription(id, b[0] == 1, &b[1..]);
@@ -764,8 +1087,11 @@ impl Bridge {
             let mut iov = Vec::with_capacity(MAX_IOV + 3);
             let mut items = Vec::new();
             let mut total = 0;
-            while idx < c.outq.len() && iov.len() + 3 <= MAX_IOV && total < MAX_SEND_BYTES {
+            while idx < c.outq.len() && total < MAX_SEND_BYTES {
                 let item = &c.outq[idx];
+                if !iov.is_empty() && iov.len() + item.iov_count() > MAX_IOV {
+                    break;
+                }
                 let before = iov.len();
                 item.iovecs(skip, &mut iov);
                 total += iov[before..].iter().map(|v| v.iov_len).sum::<usize>();
@@ -886,7 +1212,21 @@ impl Bridge {
             return;
         }
         for i in 0..self.conns.len() {
-            if self.conns[i].as_ref().is_some_and(|c| c.role == Role::Pub && !c.recv_inflight && !c.dead) {
+            if self.conns[i].as_ref().is_some_and(|c| c.role == Role::Pub && !c.dead && !c.starved) {
+                self.post_recv(i);
+            }
+        }
+    }
+
+    /// Re-arms connections whose recvs ended on an empty ring, once buffers
+    /// have come back.
+    fn unstarve(&mut self) {
+        if ring_free() == 0 {
+            return;
+        }
+        for i in 0..self.conns.len() {
+            if self.conns[i].as_ref().is_some_and(|c| c.starved && !c.dead) {
+                self.conn(i).starved = false;
                 self.post_recv(i);
             }
         }
@@ -914,6 +1254,8 @@ impl Bridge {
         c.outq.clear();
         c.queued_bytes = 0;
         c.direct = None;
+        c.rx.clear();
+        c.rx_avail = 0;
         self.reap(id);
         self.resume_pubs();
     }
@@ -931,9 +1273,13 @@ impl Bridge {
         let front = TcpListener::bind(&self.cfg.front).expect("bind front").into_raw_fd();
         let back = TcpListener::bind(&self.cfg.back).expect("bind back").into_raw_fd();
         eprintln!(
-            "[bridge] XSUB front {} / XPUB back {} | zc={} inflight={} budget={}MB sub_cap={}MB chunk={}KB policy={}",
+            "[bridge] XSUB front {} / XPUB back {} | recv={:?} x{} ring={}x{}KB | zc={} inflight={} budget={}MB sub_cap={}MB chunk={}KB policy={}",
             self.cfg.front,
             self.cfg.back,
+            self.cfg.recv_mode,
+            self.cfg.recvs,
+            self.cfg.ring_entries,
+            self.cfg.ring_buf >> 10,
             self.cfg.zc,
             self.cfg.inflight,
             self.cfg.budget >> 20,
@@ -964,26 +1310,35 @@ impl Bridge {
                         }
                         self.post_accept(role, listener);
                     }
-                    Some(Op::Recv { conn }) => {
+                    Some(Op::Recv { conn, multishot }) => {
                         let id = *conn;
-                        self.ops[ud as usize] = None;
-                        self.free_ops.push(ud as usize);
-                        self.on_recv(id, res);
+                        // A multishot recv stays armed while F_MORE is set.
+                        let armed = *multishot && cqueue::more(flags);
+                        if !armed {
+                            self.ops[ud as usize] = None;
+                            self.free_ops.push(ud as usize);
+                        }
+                        self.on_recv(id, res, flags, armed);
                     }
                     Some(Op::Send { .. }) => self.on_send(ud, res, flags),
                     other => panic!("unexpected completion for op {} ({})", ud, other.is_some()),
                 }
             }
+            self.unstarve();
             if last.elapsed() >= Duration::from_secs(1) {
                 let s = &self.stats;
                 let dt = last.elapsed().as_secs_f64();
                 eprintln!(
-                    "[bridge] in {:.0} MB/s | msgs_in {} out_bytes {} | avg send {} KB | live {} MB | dropped {} | zc notifs {} copied {} | pauses {}",
+                    "[bridge] in {:.0} MB/s | msgs_in {} out_bytes {} | avg send {} KB | avg recv {} KB | live {} MB | ring in use {} | enobufs {} | reorders {} | dropped {} | zc notifs {} copied {} | pauses {}",
                     (s.bytes_in - last_bytes) as f64 / dt / 1e6,
                     s.msgs_in,
                     s.bytes_out,
                     s.bytes_out / s.sends.max(1) / 1024,
+                    s.bytes_in / s.recvs.max(1) / 1024,
                     live_bytes() >> 20,
+                    ring_in_use(),
+                    s.enobufs,
+                    s.reorders,
                     s.dropped,
                     s.notifs,
                     s.zc_copied,
