@@ -64,6 +64,13 @@ def run(name, cmd, size):
         r["proxy_cpu_s_per_GB"] = round(cpu / (mbps / 1000), 3) if mbps else None
     return r
 
+only = os.environ.get("CONFIGS")
+if only:
+    CONFIGS = {k: v for k, v in CONFIGS.items() if k in only.split(";")}
+extra = os.environ.get("BRIDGE_ARGS")
+if extra:
+    CONFIGS = {f"{k} [{extra}]" if v and v[0] == BRIDGE else k: (v + extra.split() if v and v[0] == BRIDGE else v) for k, v in CONFIGS.items()}
+OUT = os.environ.get("OUT", "results.json")
 results = []
 for size in SIZES:
     for name, cmd in CONFIGS.items():
@@ -72,4 +79,4 @@ for size in SIZES:
             r.update(config=name, size=size, rep=rep)
             print(json.dumps(r), flush=True)
             results.append(r)
-json.dump(results, open(os.path.join(HERE, "results.json"), "w"), indent=1)
+json.dump(results, open(os.path.join(HERE, OUT), "w"), indent=1)
