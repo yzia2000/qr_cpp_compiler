@@ -53,7 +53,7 @@ io_uring driver are about 900 lines in `src/main.rs`.
 cargo build --release
 ./target/release/zmtp-uring-bridge --front 127.0.0.1:5555 --back 127.0.0.1:5556 \
     [--zc on|off] [--budget-mb 256] [--sub-cap-mb 64] [--chunk-kb 256] \
-    [--direct-kb 64] [--policy backpressure|drop]
+    [--direct-kb 64] [--policy backpressure|drop] [--inflight 2]
 
 # benchmark (needs libzmq-dev, taskset, python3)
 cd bench && for x in pub sub zproxy; do gcc -O2 -o $x $x.c -lzmq; done
@@ -101,6 +101,33 @@ What this shows:
   loss. Live buffer memory stayed around 1 MB throughout. The
   `--policy drop` path ran but never triggered, because no subscriber fell
   behind; it has not been exercised against a slow consumer.
+
+### Two sends in flight per subscriber (`--inflight 2`)
+
+Each round submits up to K `SENDMSG(_ZC)` ops per subscriber as one
+`IOSQE_IO_LINK` chain, each with `MSG_WAITALL`, so the next batch is already
+queued in the kernel while the current one is written, and TCP byte order
+still holds. This was a separate run (`bench/results_inflight.json`), so the
+baselines were re-measured alongside it; medians of 3 runs:
+
+| Message | direct | `zmq_proxy` | copy, K=1 | **copy, K=2** | zc, K=1 | zc, K=2 |
+|---|---|---|---|---|---|---|
+| 10 KiB  | 941 MB/s  | 380 · 2.43 s/GB  | 910 · 0.39 | **917 · 0.38** | 879 · 0.79 | 865 · 0.80 |
+| 100 KiB | 2776 MB/s | 1282 · 0.60 s/GB | 2306 · 0.25 | **2676 · 0.23** | 1137 · 0.60 | 1123 · 0.61 |
+| 1 MiB   | 2630 MB/s | **2485 · 0.23 s/GB** | 2299 · 0.30 | 2200 · 0.30 | 1489 · 0.46 | 1521 · 0.46 |
+
+* **100 KiB: +16%** (2306 → 2676 MB/s), which is 96% of the direct
+  ceiling and 2.1× `zmq_proxy`. This is the size where the gap between one
+  send finishing and the next being submitted was costing throughput.
+* **10 KiB:** no change; it was already at about 97% of the ceiling.
+* **1 MiB: no improvement (slightly worse, about −4%), and `zmq_proxy`
+  still leads by about 10%.** The average send at 1 MiB was about one
+  message, so the bridge is waiting on its single publisher recv path, not
+  on a send gap. The remaining suspect is the receive side: each 1 MiB
+  frame takes a chunk recv plus a direct recv, with one recv in flight per
+  publisher. Untested.
+* Zero-copy sends are unaffected; on loopback every one of them is still
+  copied by the kernel.
 
 Caveats: these are loopback numbers on a small VM with everything on 4
 cores. The PUB and SUB are libzmq in both cases, so the comparison between

@@ -1,0 +1,470 @@
+[
+ {
+  "msgs_per_s": 92748,
+  "MB_per_s": 949.7,
+  "config": "direct (no proxy)",
+  "size": 10240,
+  "rep": 0
+ },
+ {
+  "msgs_per_s": 90823,
+  "MB_per_s": 930.0,
+  "config": "direct (no proxy)",
+  "size": 10240,
+  "rep": 1
+ },
+ {
+  "msgs_per_s": 91895,
+  "MB_per_s": 941.0,
+  "config": "direct (no proxy)",
+  "size": 10240,
+  "rep": 2
+ },
+ {
+  "msgs_per_s": 37991,
+  "MB_per_s": 389.0,
+  "proxy_cpu_cores": 0.93,
+  "proxy_cpu_s_per_GB": 2.385,
+  "config": "libzmq zmq_proxy",
+  "size": 10240,
+  "rep": 0
+ },
+ {
+  "msgs_per_s": 37088,
+  "MB_per_s": 379.8,
+  "proxy_cpu_cores": 0.92,
+  "proxy_cpu_s_per_GB": 2.433,
+  "config": "libzmq zmq_proxy",
+  "size": 10240,
+  "rep": 1
+ },
+ {
+  "msgs_per_s": 34483,
+  "MB_per_s": 353.1,
+  "proxy_cpu_cores": 0.91,
+  "proxy_cpu_s_per_GB": 2.583,
+  "config": "libzmq zmq_proxy",
+  "size": 10240,
+  "rep": 2
+ },
+ {
+  "msgs_per_s": 86976,
+  "MB_per_s": 890.6,
+  "proxy_cpu_cores": 0.35,
+  "proxy_cpu_s_per_GB": 0.393,
+  "config": "uring bridge (copy)",
+  "size": 10240,
+  "rep": 0
+ },
+ {
+  "msgs_per_s": 89447,
+  "MB_per_s": 915.9,
+  "proxy_cpu_cores": 0.35,
+  "proxy_cpu_s_per_GB": 0.38,
+  "config": "uring bridge (copy)",
+  "size": 10240,
+  "rep": 1
+ },
+ {
+  "msgs_per_s": 88816,
+  "MB_per_s": 909.5,
+  "proxy_cpu_cores": 0.35,
+  "proxy_cpu_s_per_GB": 0.385,
+  "config": "uring bridge (copy)",
+  "size": 10240,
+  "rep": 2
+ },
+ {
+  "msgs_per_s": 81032,
+  "MB_per_s": 829.8,
+  "proxy_cpu_cores": 0.69,
+  "proxy_cpu_s_per_GB": 0.831,
+  "config": "uring bridge (zc)",
+  "size": 10240,
+  "rep": 0
+ },
+ {
+  "msgs_per_s": 97632,
+  "MB_per_s": 999.8,
+  "proxy_cpu_cores": 0.69,
+  "proxy_cpu_s_per_GB": 0.69,
+  "config": "uring bridge (zc)",
+  "size": 10240,
+  "rep": 1
+ },
+ {
+  "msgs_per_s": 85880,
+  "MB_per_s": 879.4,
+  "proxy_cpu_cores": 0.69,
+  "proxy_cpu_s_per_GB": 0.789,
+  "config": "uring bridge (zc)",
+  "size": 10240,
+  "rep": 2
+ },
+ {
+  "msgs_per_s": 88569,
+  "MB_per_s": 906.9,
+  "proxy_cpu_cores": 0.35,
+  "proxy_cpu_s_per_GB": 0.386,
+  "config": "uring bridge (copy, 2 in flight)",
+  "size": 10240,
+  "rep": 0
+ },
+ {
+  "msgs_per_s": 89537,
+  "MB_per_s": 916.9,
+  "proxy_cpu_cores": 0.35,
+  "proxy_cpu_s_per_GB": 0.38,
+  "config": "uring bridge (copy, 2 in flight)",
+  "size": 10240,
+  "rep": 1
+ },
+ {
+  "msgs_per_s": 89812,
+  "MB_per_s": 919.7,
+  "proxy_cpu_cores": 0.35,
+  "proxy_cpu_s_per_GB": 0.378,
+  "config": "uring bridge (copy, 2 in flight)",
+  "size": 10240,
+  "rep": 2
+ },
+ {
+  "msgs_per_s": 82870,
+  "MB_per_s": 848.6,
+  "proxy_cpu_cores": 0.68,
+  "proxy_cpu_s_per_GB": 0.804,
+  "config": "uring bridge (zc, 2 in flight)",
+  "size": 10240,
+  "rep": 0
+ },
+ {
+  "msgs_per_s": 84508,
+  "MB_per_s": 865.4,
+  "proxy_cpu_cores": 0.69,
+  "proxy_cpu_s_per_GB": 0.8,
+  "config": "uring bridge (zc, 2 in flight)",
+  "size": 10240,
+  "rep": 1
+ },
+ {
+  "msgs_per_s": 84601,
+  "MB_per_s": 866.3,
+  "proxy_cpu_cores": 0.69,
+  "proxy_cpu_s_per_GB": 0.801,
+  "config": "uring bridge (zc, 2 in flight)",
+  "size": 10240,
+  "rep": 2
+ },
+ {
+  "msgs_per_s": 27234,
+  "MB_per_s": 2788.7,
+  "config": "direct (no proxy)",
+  "size": 102400,
+  "rep": 0
+ },
+ {
+  "msgs_per_s": 27114,
+  "MB_per_s": 2776.5,
+  "config": "direct (no proxy)",
+  "size": 102400,
+  "rep": 1
+ },
+ {
+  "msgs_per_s": 26635,
+  "MB_per_s": 2727.5,
+  "config": "direct (no proxy)",
+  "size": 102400,
+  "rep": 2
+ },
+ {
+  "msgs_per_s": 12519,
+  "MB_per_s": 1281.9,
+  "proxy_cpu_cores": 0.77,
+  "proxy_cpu_s_per_GB": 0.598,
+  "config": "libzmq zmq_proxy",
+  "size": 102400,
+  "rep": 0
+ },
+ {
+  "msgs_per_s": 12713,
+  "MB_per_s": 1301.8,
+  "proxy_cpu_cores": 0.76,
+  "proxy_cpu_s_per_GB": 0.582,
+  "config": "libzmq zmq_proxy",
+  "size": 102400,
+  "rep": 1
+ },
+ {
+  "msgs_per_s": 12355,
+  "MB_per_s": 1265.2,
+  "proxy_cpu_cores": 0.76,
+  "proxy_cpu_s_per_GB": 0.599,
+  "config": "libzmq zmq_proxy",
+  "size": 102400,
+  "rep": 2
+ },
+ {
+  "msgs_per_s": 25561,
+  "MB_per_s": 2617.5,
+  "proxy_cpu_cores": 0.64,
+  "proxy_cpu_s_per_GB": 0.246,
+  "config": "uring bridge (copy)",
+  "size": 102400,
+  "rep": 0
+ },
+ {
+  "msgs_per_s": 22515,
+  "MB_per_s": 2305.5,
+  "proxy_cpu_cores": 0.56,
+  "proxy_cpu_s_per_GB": 0.241,
+  "config": "uring bridge (copy)",
+  "size": 102400,
+  "rep": 1
+ },
+ {
+  "msgs_per_s": 20646,
+  "MB_per_s": 2114.2,
+  "proxy_cpu_cores": 0.53,
+  "proxy_cpu_s_per_GB": 0.253,
+  "config": "uring bridge (copy)",
+  "size": 102400,
+  "rep": 2
+ },
+ {
+  "msgs_per_s": 10993,
+  "MB_per_s": 1125.7,
+  "proxy_cpu_cores": 0.69,
+  "proxy_cpu_s_per_GB": 0.611,
+  "config": "uring bridge (zc)",
+  "size": 102400,
+  "rep": 0
+ },
+ {
+  "msgs_per_s": 11102,
+  "MB_per_s": 1136.8,
+  "proxy_cpu_cores": 0.68,
+  "proxy_cpu_s_per_GB": 0.598,
+  "config": "uring bridge (zc)",
+  "size": 102400,
+  "rep": 1
+ },
+ {
+  "msgs_per_s": 11575,
+  "MB_per_s": 1185.3,
+  "proxy_cpu_cores": 0.7,
+  "proxy_cpu_s_per_GB": 0.591,
+  "config": "uring bridge (zc)",
+  "size": 102400,
+  "rep": 2
+ },
+ {
+  "msgs_per_s": 22287,
+  "MB_per_s": 2282.2,
+  "proxy_cpu_cores": 0.68,
+  "proxy_cpu_s_per_GB": 0.297,
+  "config": "uring bridge (copy, 2 in flight)",
+  "size": 102400,
+  "rep": 0
+ },
+ {
+  "msgs_per_s": 26816,
+  "MB_per_s": 2745.9,
+  "proxy_cpu_cores": 0.63,
+  "proxy_cpu_s_per_GB": 0.229,
+  "config": "uring bridge (copy, 2 in flight)",
+  "size": 102400,
+  "rep": 1
+ },
+ {
+  "msgs_per_s": 26133,
+  "MB_per_s": 2676.0,
+  "proxy_cpu_cores": 0.61,
+  "proxy_cpu_s_per_GB": 0.229,
+  "config": "uring bridge (copy, 2 in flight)",
+  "size": 102400,
+  "rep": 2
+ },
+ {
+  "msgs_per_s": 10756,
+  "MB_per_s": 1101.4,
+  "proxy_cpu_cores": 0.69,
+  "proxy_cpu_s_per_GB": 0.628,
+  "config": "uring bridge (zc, 2 in flight)",
+  "size": 102400,
+  "rep": 0
+ },
+ {
+  "msgs_per_s": 10993,
+  "MB_per_s": 1125.6,
+  "proxy_cpu_cores": 0.68,
+  "proxy_cpu_s_per_GB": 0.606,
+  "config": "uring bridge (zc, 2 in flight)",
+  "size": 102400,
+  "rep": 1
+ },
+ {
+  "msgs_per_s": 10971,
+  "MB_per_s": 1123.4,
+  "proxy_cpu_cores": 0.68,
+  "proxy_cpu_s_per_GB": 0.607,
+  "config": "uring bridge (zc, 2 in flight)",
+  "size": 102400,
+  "rep": 2
+ },
+ {
+  "msgs_per_s": 2508,
+  "MB_per_s": 2630.2,
+  "config": "direct (no proxy)",
+  "size": 1048576,
+  "rep": 0
+ },
+ {
+  "msgs_per_s": 2385,
+  "MB_per_s": 2500.4,
+  "config": "direct (no proxy)",
+  "size": 1048576,
+  "rep": 1
+ },
+ {
+  "msgs_per_s": 2550,
+  "MB_per_s": 2673.8,
+  "config": "direct (no proxy)",
+  "size": 1048576,
+  "rep": 2
+ },
+ {
+  "msgs_per_s": 2349,
+  "MB_per_s": 2463.5,
+  "proxy_cpu_cores": 0.63,
+  "proxy_cpu_s_per_GB": 0.257,
+  "config": "libzmq zmq_proxy",
+  "size": 1048576,
+  "rep": 0
+ },
+ {
+  "msgs_per_s": 2431,
+  "MB_per_s": 2548.8,
+  "proxy_cpu_cores": 0.58,
+  "proxy_cpu_s_per_GB": 0.226,
+  "config": "libzmq zmq_proxy",
+  "size": 1048576,
+  "rep": 1
+ },
+ {
+  "msgs_per_s": 2370,
+  "MB_per_s": 2484.9,
+  "proxy_cpu_cores": 0.58,
+  "proxy_cpu_s_per_GB": 0.232,
+  "config": "libzmq zmq_proxy",
+  "size": 1048576,
+  "rep": 2
+ },
+ {
+  "msgs_per_s": 2193,
+  "MB_per_s": 2299.3,
+  "proxy_cpu_cores": 0.68,
+  "proxy_cpu_s_per_GB": 0.297,
+  "config": "uring bridge (copy)",
+  "size": 1048576,
+  "rep": 0
+ },
+ {
+  "msgs_per_s": 2194,
+  "MB_per_s": 2300.5,
+  "proxy_cpu_cores": 0.67,
+  "proxy_cpu_s_per_GB": 0.293,
+  "config": "uring bridge (copy)",
+  "size": 1048576,
+  "rep": 1
+ },
+ {
+  "msgs_per_s": 2119,
+  "MB_per_s": 2221.9,
+  "proxy_cpu_cores": 0.67,
+  "proxy_cpu_s_per_GB": 0.303,
+  "config": "uring bridge (copy)",
+  "size": 1048576,
+  "rep": 2
+ },
+ {
+  "msgs_per_s": 1424,
+  "MB_per_s": 1493.6,
+  "proxy_cpu_cores": 0.69,
+  "proxy_cpu_s_per_GB": 0.461,
+  "config": "uring bridge (zc)",
+  "size": 1048576,
+  "rep": 0
+ },
+ {
+  "msgs_per_s": 1304,
+  "MB_per_s": 1367.8,
+  "proxy_cpu_cores": 0.68,
+  "proxy_cpu_s_per_GB": 0.499,
+  "config": "uring bridge (zc)",
+  "size": 1048576,
+  "rep": 1
+ },
+ {
+  "msgs_per_s": 1420,
+  "MB_per_s": 1488.7,
+  "proxy_cpu_cores": 0.68,
+  "proxy_cpu_s_per_GB": 0.458,
+  "config": "uring bridge (zc)",
+  "size": 1048576,
+  "rep": 2
+ },
+ {
+  "msgs_per_s": 2074,
+  "MB_per_s": 2175.2,
+  "proxy_cpu_cores": 0.64,
+  "proxy_cpu_s_per_GB": 0.294,
+  "config": "uring bridge (copy, 2 in flight)",
+  "size": 1048576,
+  "rep": 0
+ },
+ {
+  "msgs_per_s": 2098,
+  "MB_per_s": 2199.9,
+  "proxy_cpu_cores": 0.65,
+  "proxy_cpu_s_per_GB": 0.296,
+  "config": "uring bridge (copy, 2 in flight)",
+  "size": 1048576,
+  "rep": 1
+ },
+ {
+  "msgs_per_s": 2103,
+  "MB_per_s": 2204.7,
+  "proxy_cpu_cores": 0.67,
+  "proxy_cpu_s_per_GB": 0.302,
+  "config": "uring bridge (copy, 2 in flight)",
+  "size": 1048576,
+  "rep": 2
+ },
+ {
+  "msgs_per_s": 1450,
+  "MB_per_s": 1520.9,
+  "proxy_cpu_cores": 0.69,
+  "proxy_cpu_s_per_GB": 0.455,
+  "config": "uring bridge (zc, 2 in flight)",
+  "size": 1048576,
+  "rep": 0
+ },
+ {
+  "msgs_per_s": 1485,
+  "MB_per_s": 1557.5,
+  "proxy_cpu_cores": 0.69,
+  "proxy_cpu_s_per_GB": 0.446,
+  "config": "uring bridge (zc, 2 in flight)",
+  "size": 1048576,
+  "rep": 1
+ },
+ {
+  "msgs_per_s": 1373,
+  "MB_per_s": 1439.9,
+  "proxy_cpu_cores": 0.68,
+  "proxy_cpu_s_per_GB": 0.472,
+  "config": "uring bridge (zc, 2 in flight)",
+  "size": 1048576,
+  "rep": 2
+ }
+]
