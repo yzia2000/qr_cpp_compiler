@@ -100,4 +100,56 @@ cd bench && gcc -O2 -o harness harness.c -lzmq -lpthread && gcc -O2 -o libzmq_xs
 python3 run.py      # SIZES=, MODES=, APPS=, REPS=, WARM=, MEAS=, OUT= to override
 ```
 
-RESULTS_PLACEHOLDER
+## Results
+
+Medians of 3 runs. Throughput is the payload and topic bytes delivered to the
+XPUB-side receiver per second. Latency is per packet, measured with the
+same-process monotonic clock. "cores" is the application's CPU use. No run
+lost a message. Raw data: `bench/results.json`.
+
+### Saturate: end-to-end throughput, and latency under full load
+
+| Size | | direct (ceiling) | **custom iouring** | **libzmq** |
+|---|---|---|---|---|
+| 10 KiB  | throughput | 1193 MB/s · 116k msg/s | **1118 MB/s** · 109k msg/s | 667 MB/s · 65k msg/s |
+|         | p50 / p99  | 2.8 / 4.5 ms | 7.6 / 15.5 ms | 19.8 / 23.1 ms |
+|         | app cores  | – | 0.64 | 1.05 |
+| 100 KiB | throughput | 2192 MB/s · 21k msg/s | **1677 MB/s** · 16k msg/s | 1294 MB/s · 13k msg/s |
+|         | p50 / p99  | 4.0 / 7.0 ms | 4.3 / 6.8 ms | 14.2 / 24.0 ms |
+|         | app cores  | – | 0.65 | 1.11 |
+| 1 MiB   | throughput | 3918 MB/s · 3.7k msg/s | 2287 MB/s · 2.2k msg/s | **2390 MB/s** · 2.3k msg/s |
+|         | p50 / p99  | 13.7 / 27.0 ms | 25.7 / 41.6 ms | 25.4 / 38.2 ms |
+|         | app cores  | – | 0.97 | 1.02 |
+
+### Pingpong: per-packet latency with one message in flight
+
+| Size | direct p50 / p99 | **custom iouring** p50 / p99 | **libzmq** p50 / p99 |
+|---|---|---|---|
+| 10 KiB  | 33 / 58 µs   | **58 / 95 µs**   | 95 / 154 µs  |
+| 100 KiB | 43 / 72 µs   | **100 / 143 µs** | 140 / 198 µs |
+| 1 MiB   | 248 / 352 µs | 602 / 786 µs     | **498 / 707 µs** |
+
+### Reading the numbers
+
+* **10 KiB and 100 KiB: custom iouring wins on every axis.** Throughput is
+  1.7× and 1.3× libzmq's. Pingpong latency is about 40 µs lower, at p50 and
+  at p99. It uses about 0.65 of a core against libzmq's 1.05-1.1. At 10 KiB
+  it reaches 94% of the direct ceiling. One of its three 10 KiB saturate
+  runs came in at 505 MB/s; the median and the other run were about
+  1.1-1.2 GB/s.
+* **1 MiB: libzmq is slightly ahead**: 4% more throughput, and about 100 µs
+  lower pingpong p50. custom iouring's single thread does the whole
+  receive copy, then the whole send copy, of each 1 MiB message. libzmq
+  overlaps them across its I/O threads and the forwarding thread, which only
+  moves `zmq_msg_t`s. At 1 MiB custom iouring is at 0.97 core, so it is
+  CPU-bound. This is the cost of the "straight synchronous, no queue"
+  design at large sizes.
+* **Saturate-mode latency is queueing, not processing.** The direct
+  ceiling alone shows ms-scale p50, because the harness's own libzmq queues
+  and the TCP buffers are full. Compare the applications' saturate
+  latencies with each other, not with pingpong.
+
+Caveats: loopback on a 4-vCPU VM. The harness and libzmq endpoints use 2
+cores, and the application gets the other 2. Absolute numbers will differ on
+real hardware and NICs. Zero-copy send (`--zc on`) cannot show a benefit on
+loopback.
