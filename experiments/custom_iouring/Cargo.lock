@@ -15,6 +15,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4e7648175b45a9a48536d676f68d918270699102aa8dab5496df06904c914600"
 
 [[package]]
+name = "custom-iouring"
+version = "0.1.0"
+dependencies = [
+ "io-uring",
+ "libc",
+ "weida-zmtp",
+]
+
+[[package]]
 name = "io-uring"
 version = "0.7.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -36,12 +45,3 @@ name = "weida-zmtp"
 version = "0.1.0-alpha.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8b810c27e5b228dc6e77507dc3cba077c26b3dd1277d82e4061a3799ebe6dfc6"
-
-[[package]]
-name = "zmtp-uring-bridge"
-version = "0.1.0"
-dependencies = [
- "io-uring",
- "libc",
- "weida-zmtp",
-]

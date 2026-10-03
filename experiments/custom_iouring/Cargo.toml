@@ -1,5 +1,5 @@
 [package]
-name = "zmtp-uring-bridge"
+name = "custom-iouring"
 version = "0.1.0"
 edition = "2024"
 
