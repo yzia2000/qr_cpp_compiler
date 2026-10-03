@@ -55,6 +55,15 @@ struct Config {
     recvs: usize,
     ring_buf: usize,
     ring_entries: u16,
+    /// Diagnostics: parse publisher frames, then drop them (receive path only).
+    sink: bool,
+    /// Diagnostics: no publisher; keep every subscriber fed with frames of this size (send path only).
+    source: usize,
+    max_send: usize,
+    /// Fixed SO_RCVBUF for publisher connections (0 = kernel autotuning).
+    front_rcvbuf: usize,
+    /// IOSQE_ASYNC on sends: run them on io-wq workers instead of this thread.
+    async_send: bool,
 }
 
 fn parse_args() -> Config {
@@ -73,6 +82,11 @@ fn parse_args() -> Config {
         recvs: 2,
         ring_buf: 64 << 10,
         ring_entries: 1024,
+        sink: false,
+        source: 0,
+        max_send: 8 << 20,
+        front_rcvbuf: 0,
+        async_send: false,
     };
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut i = 0;
@@ -96,6 +110,11 @@ fn parse_args() -> Config {
                     other => panic!("--recv chunk|ring|multishot, not {other}"),
                 }
             }
+            "--sink" => c.sink = v == "on",
+            "--source" => c.source = v.parse().expect("bytes"),
+            "--front-rcvbuf-kb" => c.front_rcvbuf = v.parse::<usize>().expect("KB") << 10,
+            "--async-send" => c.async_send = v == "on",
+            "--max-send-kb" => c.max_send = v.parse::<usize>().expect("KB") << 10,
             "--recvs" => c.recvs = v.parse::<usize>().expect("count").max(1),
             "--ring-buf-kb" => c.ring_buf = v.parse::<usize>().expect("KB") << 10,
             "--ring-entries" => c.ring_entries = v.parse::<u16>().expect("power of two"),
@@ -432,6 +451,28 @@ struct Stats {
     recvs: u64,
     enobufs: u64,
     reorders: u64,
+    /// Diagnostics (BR_DIAG=1): wall time blocked in submit_and_wait, keyed
+    /// by what was outstanding when we blocked.
+    wait_ns: HashMap<&'static str, u64>,
+    busy_ns: u64,
+    wakes: u64,
+    cqes: u64,
+    recv_hist: [u64; 8],
+    send_hist: [u64; 8],
+}
+
+/// Buckets: <4K, <16K, <64K, <256K, <1M, <4M, <16M, >=16M
+fn bucket(n: usize) -> usize {
+    match n {
+        0..4096 => 0,
+        4096..16384 => 1,
+        16384..65536 => 2,
+        65536..262144 => 3,
+        262144..1048576 => 4,
+        1048576..4194304 => 5,
+        4194304..16777216 => 6,
+        _ => 7,
+    }
 }
 
 struct Bridge {
@@ -443,10 +484,10 @@ struct Bridge {
     subs_union: HashMap<Vec<u8>, usize>,
     stats: Stats,
     accept_addr: Box<(libc::sockaddr_storage, libc::socklen_t)>,
+    source_frame: Option<Rc<Frame>>,
 }
 
 const MAX_IOV: usize = 256;
-const MAX_SEND_BYTES: usize = 8 << 20;
 const IORING_SEND_ZC_REPORT_USAGE: u16 = 1 << 3;
 const IORING_NOTIF_USAGE_ZC_COPIED: i32 = 1 << 31;
 
@@ -469,6 +510,7 @@ impl Bridge {
             subs_union: HashMap::new(),
             stats: Stats::default(),
             accept_addr: Box::new((unsafe { std::mem::zeroed() }, 0)),
+            source_frame: None,
         }
     }
 
@@ -713,6 +755,7 @@ impl Bridge {
             return self.kill(id, if res == 0 { "peer closed" } else { "recv error" });
         }
         let n = res as usize;
+        self.stats.recv_hist[bucket(n)] += 1;
         if let Some((buf, pos)) = filled {
             let c = self.conn(id);
             let reordered = pos < c.last_pos;
@@ -923,6 +966,10 @@ impl Bridge {
             }
             self.conn(id).phase = Phase::Traffic;
             eprintln!("[bridge] conn {id} ready ({role:?})");
+            if role == Role::Pub && self.cfg.sink {
+                // Sink mode has no subscribers; ask for everything ourselves.
+                self.send_sub(id, true, b"");
+            }
             if role == Role::Pub {
                 let all: Vec<Vec<u8>> = self.subs_union.keys().cloned().collect();
                 for p in all {
@@ -941,7 +988,10 @@ impl Bridge {
                 v.extend_from_slice(ctx);
                 self.enqueue(id, Out::Ctrl(Rc::new(v)));
             }
-            b"SUBSCRIBE" if role == Role::Sub => self.subscription(id, true, data),
+            b"SUBSCRIBE" if role == Role::Sub => {
+                self.subscription(id, true, data);
+                self.feed(id);
+            }
             b"CANCEL" if role == Role::Sub => self.subscription(id, false, data),
             b"ERROR" => return Err("peer sent ERROR".into()),
             _ => {} // unknown or irrelevant commands are ignored, like libzmq
@@ -1017,6 +1067,12 @@ impl Bridge {
             return;
         }
         self.stats.bytes_in += f.body_len() as u64;
+        if self.cfg.sink {
+            if !f.more() {
+                self.stats.msgs_in += 1;
+            }
+            return;
+        }
         let first = !self.conn(id).in_multipart;
         if first {
             self.stats.msgs_in += 1;
@@ -1075,6 +1131,8 @@ impl Bridge {
     fn post_send(&mut self, id: usize) {
         let zc = self.cfg.zc;
         let k = self.cfg.inflight;
+        let max_send = self.cfg.max_send;
+        let async_send = self.cfg.async_send;
         let c = self.conn(id);
         if c.dead || c.send_inflight > 0 || c.outq.is_empty() {
             return;
@@ -1087,7 +1145,7 @@ impl Bridge {
             let mut iov = Vec::with_capacity(MAX_IOV + 3);
             let mut items = Vec::new();
             let mut total = 0;
-            while idx < c.outq.len() && total < MAX_SEND_BYTES {
+            while idx < c.outq.len() && total < max_send {
                 let item = &c.outq[idx];
                 if !iov.is_empty() && iov.len() + item.iov_count() > MAX_IOV {
                     break;
@@ -1123,7 +1181,11 @@ impl Bridge {
         }
         for (i, (sqe, op)) in chain.into_iter().enumerate() {
             let ud = self.op(op);
-            let sqe = if i + 1 < n { sqe.flags(squeue::Flags::IO_LINK) } else { sqe };
+            let mut fl = if i + 1 < n { squeue::Flags::IO_LINK } else { squeue::Flags::empty() };
+            if async_send {
+                fl |= squeue::Flags::ASYNC;
+            }
+            let sqe = sqe.flags(fl);
             self.push(sqe.user_data(ud));
         }
         self.stats.sends += n as u64;
@@ -1135,6 +1197,9 @@ impl Bridge {
         };
         let notif_pending = self.cfg.zc && cqueue::more(flags);
         let sent = res.max(0) as usize;
+        if sent > 0 {
+            self.stats.send_hist[bucket(sent)] += 1;
+        }
         let chain_done = {
             let c = self.conn(id);
             c.send_inflight -= 1;
@@ -1179,6 +1244,7 @@ impl Bridge {
             return self.kill(id, &format!("send error {}", -res));
         }
         let _ = total;
+        self.feed(id);
         if chain_done {
             self.post_send(id);
         }
@@ -1204,6 +1270,55 @@ impl Bridge {
             }
         }
         self.resume_pubs();
+    }
+
+    /// What is outstanding as we block: is the publisher recv armed, is a
+    /// send in flight to a subscriber, and is anything queued behind it.
+    fn wait_state(&self) -> &'static str {
+        let mut recv = false;
+        let mut send = false;
+        let mut queued = false;
+        let mut starved = false;
+        for c in self.conns.iter().flatten() {
+            if c.dead || c.phase != Phase::Traffic {
+                continue;
+            }
+            match c.role {
+                Role::Pub => {
+                    recv |= c.recvs > 0;
+                    starved |= c.starved;
+                }
+                Role::Sub => {
+                    send |= c.send_inflight > 0;
+                    queued |= c.outq.len() > c.send_inflight;
+                }
+            }
+        }
+        match (recv, send, queued, starved) {
+            (_, _, _, true) => "ring empty (ENOBUFS)",
+            (false, _, _, _) => "no recv armed (throttled)",
+            (true, false, _, _) => "recv armed, no send in flight",
+            (true, true, false, _) => "recv armed + send in flight, nothing queued",
+            (true, true, true, _) => "recv armed + send in flight, more queued",
+        }
+    }
+
+    /// `--source`: keep each subscriber's queue topped up with one shared frame.
+    fn feed(&mut self, id: usize) {
+        if self.cfg.source == 0 {
+            return;
+        }
+        if self.source_frame.is_none() {
+            let buf = Buf::alloc(self.cfg.source);
+            let mut f = Frame::new(false, self.cfg.source);
+            f.segs.push((buf, 0, self.cfg.source));
+            self.source_frame = Some(Rc::new(f));
+        }
+        let f = self.source_frame.clone().expect("frame");
+        while self.conns[id].as_ref().is_some_and(|c| !c.dead && c.role == Role::Sub && c.phase == Phase::Traffic && c.queued_bytes < (32 << 20)) {
+            self.stats.bytes_in += f.body_len() as u64;
+            self.enqueue(id, Out::Frame(f.clone()));
+        }
     }
 
     fn resume_pubs(&mut self) {
@@ -1271,6 +1386,15 @@ impl Bridge {
 
     fn run(&mut self) {
         let front = TcpListener::bind(&self.cfg.front).expect("bind front").into_raw_fd();
+        if self.cfg.front_rcvbuf > 0 {
+            // Set on the listener so accepted sockets inherit it, and before any
+            // connection exists so the window scale is chosen with it in mind.
+            let v = self.cfg.front_rcvbuf as libc::c_int;
+            let rc = unsafe {
+                libc::setsockopt(front, libc::SOL_SOCKET, libc::SO_RCVBUFFORCE, &v as *const _ as *const _, 4)
+            };
+            assert_eq!(rc, 0, "SO_RCVBUFFORCE");
+        }
         let back = TcpListener::bind(&self.cfg.back).expect("bind back").into_raw_fd();
         eprintln!(
             "[bridge] XSUB front {} / XPUB back {} | recv={:?} x{} ring={}x{}KB | zc={} inflight={} budget={}MB sub_cap={}MB chunk={}KB policy={}",
@@ -1292,9 +1416,18 @@ impl Bridge {
         let mut last = Instant::now();
         let mut last_bytes = 0u64;
         let mut cqes = Vec::with_capacity(4096);
+        let diag = std::env::var_os("BR_DIAG").is_some();
         loop {
+            let state = if diag { self.wait_state() } else { "" };
+            let t_wait = Instant::now();
             self.ring.submit_and_wait(1).expect("submit_and_wait");
+            let t_woke = Instant::now();
             cqes.extend(self.ring.completion().map(|e| (e.user_data(), e.result(), e.flags())));
+            if diag {
+                *self.stats.wait_ns.entry(state).or_default() += (t_woke - t_wait).as_nanos() as u64;
+                self.stats.wakes += 1;
+                self.stats.cqes += cqes.len() as u64;
+            }
             for (ud, res, flags) in cqes.drain(..) {
                 if cqueue::notif(flags) {
                     self.on_notif(ud, res);
@@ -1325,6 +1458,9 @@ impl Bridge {
                 }
             }
             self.unstarve();
+            if diag {
+                self.stats.busy_ns += t_woke.elapsed().as_nanos() as u64;
+            }
             if last.elapsed() >= Duration::from_secs(1) {
                 let s = &self.stats;
                 let dt = last.elapsed().as_secs_f64();
@@ -1344,7 +1480,30 @@ impl Bridge {
                     s.zc_copied,
                     s.paused
                 );
-                last_bytes = s.bytes_in;
+                if diag {
+                    let total: u64 = s.wait_ns.values().sum::<u64>() + s.busy_ns;
+                    let mut w: Vec<(&str, u64)> = s.wait_ns.iter().map(|(k, v)| (*k, *v)).collect();
+                    w.sort_by(|a, b| b.1.cmp(&a.1));
+                    let pct: Vec<String> = w.iter().map(|(k, v)| format!("\"{k}\": {:.1}", 100.0 * *v as f64 / total as f64)).collect();
+                    eprintln!(
+                        "DIAG {{\"busy_pct\": {:.1}, \"wait_pct\": {{{}}}, \"wakes\": {}, \"cqes_per_wake\": {:.2}, \"recv_hist\": {:?}, \"send_hist\": {:?}, \"bytes_in\": {}}}",
+                        100.0 * s.busy_ns as f64 / total as f64,
+                        pct.join(", "),
+                        s.wakes,
+                        s.cqes as f64 / s.wakes.max(1) as f64,
+                        s.recv_hist,
+                        s.send_hist,
+                        s.bytes_in
+                    );
+                    let s = &mut self.stats;
+                    s.wait_ns.clear();
+                    s.busy_ns = 0;
+                    s.wakes = 0;
+                    s.cqes = 0;
+                    s.recv_hist = [0; 8];
+                    s.send_hist = [0; 8];
+                }
+                last_bytes = self.stats.bytes_in;
                 last = Instant::now();
             }
         }

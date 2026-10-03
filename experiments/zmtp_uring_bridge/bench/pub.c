@@ -12,6 +12,9 @@ int main(int argc,char**argv){
   size_t size=strtoull(argv[2],0,10); double secs=atof(argv[3]);
   void*ctx=zmq_ctx_new(); void*s=zmq_socket(ctx,ZMQ_PUB);
   if(argc>4){int h=atoi(argv[4]);zmq_setsockopt(s,ZMQ_SNDHWM,&h,sizeof h);}
+  // PUB_NODROP=1: block at HWM instead of silently dropping. Without it the
+  // send loop never blocks and spins on the same core as libzmq's I/O thread.
+  if(getenv("PUB_NODROP")){int one=1;zmq_setsockopt(s,ZMQ_XPUB_NODROP,&one,sizeof one);}
   if(!strncmp(argv[1],"bind:",5)) zmq_bind(s,argv[1]+5); else zmq_connect(s,argv[1]);
   char*buf=malloc(size); memset(buf,'x',size); buf[0]='A';
   // Wait for a subscription to propagate through the proxy.

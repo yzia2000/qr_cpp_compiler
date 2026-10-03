@@ -32,6 +32,9 @@ CONFIGS = {
     "ring multishot": [BRIDGE, "--zc", "off", "--recv", "multishot"],
     "ring multishot, 256K bufs": [BRIDGE, "--zc", "off", "--recv", "multishot", "--ring-buf-kb", "256", "--ring-entries", "256"],
     "ring, 2 recvs (zc)": [BRIDGE, "--zc", "on", "--recv", "ring", "--recvs", "2"],
+    "ring, 1 recv + async send": [BRIDGE, "--zc", "off", "--recv", "ring", "--recvs", "1", "--async-send", "on"],
+    "ring, 2 recvs + async send": [BRIDGE, "--zc", "off", "--recv", "ring", "--recvs", "2", "--async-send", "on"],
+    "ring multishot + async send": [BRIDGE, "--zc", "off", "--recv", "multishot", "--async-send", "on"],
 }
 
 def cpu_secs(pid):
@@ -39,7 +42,23 @@ def cpu_secs(pid):
     f = open(f"/proc/{pid}/stat").read().rsplit(")", 1)[1].split()
     return (int(f[11]) + int(f[12])) / TICK
 
+def wait_ports_free(ports=(5555, 5556), timeout=15):
+    """A killed bridge can hold its listeners briefly while io_uring tears down."""
+    import socket
+    end = time.time() + timeout
+    while time.time() < end:
+        try:
+            for p in ports:
+                s = socket.socket(); s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                s.bind(("127.0.0.1", p)); s.close()
+            return
+        except OSError:
+            time.sleep(0.1)
+    raise RuntimeError("ports still busy")
+
+
 def run(name, cmd, size):
+    wait_ports_free()
     proxy = None
     if cmd:
         proxy = subprocess.Popen(["taskset", "-c", "2,3"] + cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
