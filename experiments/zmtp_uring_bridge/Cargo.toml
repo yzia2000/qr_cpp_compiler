@@ -1,0 +1,15 @@
+[package]
+name = "zmtp-uring-bridge"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+io-uring = "0.7"
+libc = "0.2"
+weida-zmtp = "=0.1.0-alpha.2"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"

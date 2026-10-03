@@ -1,0 +1,45 @@
+[
+ {
+  "msgs_per_s": 28074,
+  "MB_per_s": 2874.8,
+  "config": "direct (no proxy)",
+  "size": 102400,
+  "rep": 0
+ },
+ {
+  "msgs_per_s": 12474,
+  "MB_per_s": 1277.4,
+  "proxy_cpu_cores": 0.28,
+  "proxy_cpu_s_per_GB": 0.223,
+  "config": "libzmq zmq_proxy",
+  "size": 102400,
+  "rep": 0
+ },
+ {
+  "msgs_per_s": 12320,
+  "MB_per_s": 1261.6,
+  "proxy_cpu_cores": 0.28,
+  "proxy_cpu_s_per_GB": 0.226,
+  "config": "libzmq zmq_proxy hwm=0",
+  "size": 102400,
+  "rep": 0
+ },
+ {
+  "msgs_per_s": 27717,
+  "MB_per_s": 2838.2,
+  "proxy_cpu_cores": 0.25,
+  "proxy_cpu_s_per_GB": 0.09,
+  "config": "uring bridge (copy)",
+  "size": 102400,
+  "rep": 0
+ },
+ {
+  "msgs_per_s": 11763,
+  "MB_per_s": 1204.6,
+  "proxy_cpu_cores": 0.25,
+  "proxy_cpu_s_per_GB": 0.207,
+  "config": "uring bridge (zc)",
+  "size": 102400,
+  "rep": 0
+ }
+]
