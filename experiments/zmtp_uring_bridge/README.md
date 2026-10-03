@@ -54,11 +54,13 @@ cargo build --release
 ./target/release/zmtp-uring-bridge --front 127.0.0.1:5555 --back 127.0.0.1:5556 \
     [--zc on|off] [--budget-mb 256] [--sub-cap-mb 64] [--chunk-kb 256] \
     [--direct-kb 64] [--policy backpressure|drop] [--inflight 2] \
-    [--recv multishot|ring|chunk] [--recvs 2] [--ring-buf-kb 64] [--ring-entries 1024]
+    [--recv multishot|ring|chunk] [--recvs 2] [--ring-buf-kb 64] [--ring-entries 1024] \
+    [--async-send on]
 
 # benchmark (needs libzmq-dev, taskset, python3)
 cd bench && for x in pub sub zproxy; do gcc -O2 -o $x $x.c -lzmq; done
-python3 run.py            # SIZES=..., REPS=..., WARM=..., MEAS=... to override
+PUB_NODROP=1 python3 run.py   # SIZES=, REPS=, WARM=, MEAS=, CONFIGS=, OUT= to override
+python3 diag.py 1048576 zmq_proxy ring1 multishot   # per-CPU / per-socket diagnostics
 ```
 
 ## Results
@@ -169,6 +171,68 @@ Copy-mode sends, `--inflight 2`; medians of 3 runs, MB/s · proxy CPU s/GB
   traffic, use `--recv ring --recvs 2 --ring-buf-kb 256 --ring-entries 256`.
 * With zero-copy sends, ring receive behaves like before: the kernel copies on
   loopback anyway, so it is slower.
+
+## Root cause analysis
+
+Tooling: `bench/diag.py` (per-CPU, per-process and per-socket queue
+sampling), `BR_DIAG=1` (bridge wait-state and size histograms),
+`--sink`/`--source` (receive-only and send-only bridge), `ss -ti` TCP
+limit counters, and `perf record -g`.
+
+**1. Every earlier table was publisher-bound.** cpu0 (the libzmq PUB) was
+0% idle in every configuration, *including direct PUB→SUB*. libzmq PUB never
+blocks at HWM, so the benchmark's send loop spun at user level on the same
+core as libzmq's I/O thread. With `PUB_NODROP=1` (`ZMQ_XPUB_NODROP`: block
+instead of drop), direct PUB→SUB at 1 MiB rises from **2.8 to 4.6 GB/s**.
+The earlier tables compared proxies under identical conditions, but their
+absolute numbers were understated.
+
+**2. With that fixed, the limit is the bridge's single thread doing
+receive and send kernel work serially on one core.**
+
+* Under load the bridge thread is 100% runnable, and about 97% of that is
+  inside `io_uring_enter`: copies, TCP and loopback processing, and ACKs. Its
+  user-space work is 1-3%.
+* Each path is fast on its own: **7.5-8 GB/s** receive-only (`--sink`,
+  ring) and **3.8 GB/s** send-only (`--source`, independent of send size
+  from 64 KiB to 8 MiB).
+* On one core they serialize and slow each other down. ring1's receive path
+  costs about 260 µs/MB with sends sharing the core, against 132 µs/MB
+  alone. Most of the extra is the receive copy (`_copy_to_iter`) and
+  window-update ACKs (`tcp_cleanup_rbuf` → `tcp_send_ack`, about 8.9 µs per
+  ACK against 2.8 µs under multishot). The exact cause of that per-op
+  inflation is **unconfirmed**: this KVM/Firecracker guest has no hardware
+  performance counters. The suspects are cache effects from a 4 MB unread
+  backlog against a 2 MiB L2, and timer reprogramming cost in the VM.
+* ruled out: undersized receive buffer (a fixed 16 MiB `SO_RCVBUF` changed
+  nothing, because the window was full, not small); the publisher's transmit
+  running on the bridge's core (0% of samples); send batch size.
+
+**Causal test:** `--async-send` sets `IOSQE_ASYNC` on the linked send chain,
+so io_uring runs sends on an io-wq worker on the second core. Fixed
+publisher, medians of 3, MB/s (`bench/results_rootcause.json`):
+
+| Message | direct | `zmq_proxy` | ring 1 recv | ring 2 recvs | multishot | **ring 1 + async send** | **ring 2 + async send** | **multishot + async send** |
+|---|---|---|---|---|---|---|---|---|
+| 10 KiB  | 1425 | 376  | 1531 | 1551 | 1561 | 1587 | 1546 | 1546 |
+| 100 KiB | 4785 | 1298 | 1545 | 1657 | 3000 | **4729** | **4777** | 4485 |
+| 1 MiB   | 4592 | 3365 | 2080 | 2122 | 2457 | 3792 | 3826 | **3906** |
+
+* With sends on their own core, **100 KiB reaches the direct ceiling (about
+  4.8 GB/s, 3.7× `zmq_proxy`)** and **1 MiB reaches 3.9 GB/s (+16% over
+  `zmq_proxy`)**, close to the 3.8 GB/s send-path limit. The bridge uses 1.0-1.2
+  cores in total.
+* **10 KiB:** every bridge mode beats direct PUB→SUB (about 1.55 vs 1.43 GB/s)
+  and is 4× `zmq_proxy`; there the endpoints are the limit, not the
+  bridge.
+* The differences between receive modes (ring, 1 or 2 recvs, multishot)
+  mostly disappear once the cores are split. That is why two recvs never
+  helped: the constraint was one core's worth of kernel work, not recv
+  concurrency. Both 64 KiB recvs completed in the same kernel pass (2.1
+  CQEs per wake), so it was the same work on the same core.
+* The proper fix is two rings on two threads, one for receiving and one
+  for sending. `--async-send` approximates that by using io-wq as the second
+  thread, with ordering preserved by the linked chain.
 
 Caveats: these are loopback numbers on a small VM with everything on 4
 cores. The PUB and SUB are libzmq in both cases, so the comparison between
