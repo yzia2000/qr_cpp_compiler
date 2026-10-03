@@ -149,6 +149,77 @@ lost a message. Raw data: `bench/results.json`.
   and the TCP buffers are full. Compare the applications' saturate
   latencies with each other, not with pingpong.
 
+## Two threads: receive thread → SPSC queue of buffer ids → publish thread
+
+`src/main.rs` (binary `custom-iouring`) splits the work. The single-thread
+version above is kept as `custom-iouring-1thread`.
+
+* The **receive thread** owns the **xsub iouring** and one provided buffer
+  ring shared by all XSUB connections. Once a whole message sits in ring
+  buffers, it pushes a *descriptor* (the `(buffer id, offset, length)` list
+  covering the message's original bytes) onto a lock-free SPSC queue. No
+  message bytes cross threads.
+* The **publish thread** owns the **xpub iouring**. It pops a descriptor,
+  sends those same buffers to every matching XPUB peer (zero copy), waits
+  for the sends, and pushes the descriptor back on a second SPSC queue. The
+  receive thread, the buffer ring's only owner, then returns the buffers to
+  the ring.
+* **`--depth N`** (default 1) is the forward queue's capacity. While it is
+  full, no recv is posted, so TCP pushes back on the XSUB peers.
+* Each thread sleeps in its own ring. They wake each other with
+  `IORING_OP_MSG_RING` doorbells, sent only when the other side has
+  advertised that it is asleep and needs waking (SeqCst fences on both
+  sides, so no lost wake-ups).
+
+Same harness and pinning. The two-thread version pins the receive thread to
+cpu2 and the publish thread to cpu3. Medians of 3 runs, with the full range
+in brackets where runs disagreed a lot. No run lost a message. Raw data:
+`bench/results_2threads.json`.
+
+### Saturate: throughput MB/s (p50 / p99 latency under full load)
+
+| Size | direct | 1 thread | 2 threads, depth 1 | 2 threads, depth 8 | 2 threads, depth 64 | libzmq |
+|---|---|---|---|---|---|---|
+| 10 KiB  | 1118 | **1266** (4.6 / 9.6 ms) | 408 (11.9 / 15.8 ms) | 1063 (4.4 / 9.6 ms) | **1266** (1.2 / 10.0 ms) | 463 (16.1 / 27.2 ms) |
+| 100 KiB | 2437 | 1504 [1498-2518] (4.5 / 7.9 ms) | 1832 (5.2 / 10.2 ms) | **2851** [2177-3566] (2.3 / 9.0 ms) | 1493 [1415-3738] (5.9 / 12.0 ms) | 1214 (26.6 / 35.5 ms) |
+| 1 MiB   | 4046 | 2299 (26.2 / 38.6 ms) | 2506 [2476-3256] (25.2 / 34.8 ms) | **2568** [2311-3529] (23.8 / 37.1 ms) | 2269 (45.3 / 64.6 ms) | 2422 (30.6 / 60.8 ms) |
+
+### Pingpong: per-packet latency p50 / p99, µs (one message in flight)
+
+| Size | direct | 1 thread | 2 threads, depth 1 | 2 threads, depth 8 | 2 threads, depth 64 | libzmq |
+|---|---|---|---|---|---|---|
+| 10 KiB  | 32 / 60   | **58 / 93**   | 82 / 131  | 74 / 125  | 73 / 118  | 93 / 148  |
+| 100 KiB | 43 / 74   | **100 / 155** | 127 / 204 | 118 / 182 | 120 / 191 | 140 / 214 |
+| 1 MiB   | 243 / 330 | 600 / 776     | 687 / 962 | 687 / 932 | 671 / 902 | **507 / 767** |
+
+### What the two-thread version changes
+
+* **Throughput at 100 KiB and up improves, but unevenly.** Depth 8 is the
+  best two-thread setting: 100 KiB median 2851 MB/s (1.9× the single
+  thread, 2.3× libzmq), and 1 MiB 2568 MB/s (+12% over the single thread, +6%
+  over libzmq). The run-to-run spread is wide: individual runs reached 3.5
+  GB/s at 100 KiB and 1 MiB, others stayed near 2.2-2.3. The cause is not
+  established. It is consistent with the scheduling of the four harness and
+  libzmq threads sharing cpus 0-1.
+* **At 10 KiB, depth matters a lot.** Depth 1 costs one cross-thread
+  handoff per message, about 100k per second, and drops to 408 MB/s. Depth
+  64 reaches 1266 MB/s, matching the single thread, at the lowest saturate
+  p50 of any configuration (1.2 ms).
+* **Per-packet latency gets worse with two threads.** Pingpong p50 is
+  15-30 µs higher at 10-100 KiB, and about 85 µs higher at 1 MiB, than the
+  single thread: the cost of the handoff and wake-up. It is still better
+  than libzmq at 10 and 100 KiB. At 1 MiB libzmq has the lowest latency of
+  all.
+* **Depth 64** helps small messages but adds queueing: 1 MiB saturate p50
+  doubles to 45 ms, and 100 KiB is erratic.
+* **CPU:** the two-thread version uses 1.0-1.4 cores under load, against
+  0.6-1.0 for the single thread.
+
+So the split pays off for throughput at medium and large message sizes,
+with depth around 8. It does not pay off for per-packet latency. For
+latency-sensitive traffic the single-thread version is still the best
+custom iouring.
+
 Caveats: loopback on a 4-vCPU VM. The harness and libzmq endpoints use 2
 cores, and the application gets the other 2. Absolute numbers will differ on
 real hardware and NICs. Zero-copy send (`--zc on`) cannot show a benefit on
