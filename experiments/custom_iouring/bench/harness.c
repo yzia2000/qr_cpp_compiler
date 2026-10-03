@@ -135,8 +135,10 @@ int main(int argc, char **argv) {
         }
         last = seq;
     }
+    // The sender may be blocked in zmq_msg_send (NODROP, nobody reading any
+    // more), so it is not joined: results are printed and the process exits.
     atomic_store(&stop, 1);
-    pthread_join(th, NULL);
+    (void)th;
     double dt = meas_s;
     qsort(lat, n, sizeof *lat, cmp);
     #define PCT(p) (n ? lat[(size_t)((p) * (n - 1))] / 1000.0 : 0)
