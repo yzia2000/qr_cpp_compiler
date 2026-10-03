@@ -17,12 +17,15 @@ TICK = os.sysconf("SC_CLK_TCK")
 
 APPS = {
     "direct": None,
-    "custom iouring": [os.path.join(HERE, "..", "target", "release", "custom-iouring"), "--xsub", "127.0.0.1:5555", "--xpub", "127.0.0.1:5556"],
+    "custom iouring 1 thread": [os.path.join(HERE, "..", "target", "release", "custom-iouring-1thread"), "--xsub", "127.0.0.1:5555", "--xpub", "127.0.0.1:5556"],
+    "custom iouring 2 threads, depth 1": [os.path.join(HERE, "..", "target", "release", "custom-iouring"), "--cpus", "2,3", "--depth", "1"],
+    "custom iouring 2 threads, depth 8": [os.path.join(HERE, "..", "target", "release", "custom-iouring"), "--cpus", "2,3", "--depth", "8"],
+    "custom iouring 2 threads, depth 64": [os.path.join(HERE, "..", "target", "release", "custom-iouring"), "--cpus", "2,3", "--depth", "64"],
     "libzmq": [os.path.join(HERE, "libzmq_xsub_xpub"), XSUB, XPUB],
 }
 only = os.environ.get("APPS")
 if only:
-    APPS = {k: v for k, v in APPS.items() if k in only.split(",")}
+    APPS = {k: v for k, v in APPS.items() if k in only.split(";")}
 
 
 def ports_free():
