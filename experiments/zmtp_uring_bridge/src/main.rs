@@ -6,7 +6,7 @@
 //! What replaces libzmq's HWM / SNDBUF / RCVBUF here:
 //! * received bytes land in refcounted buffers and are forwarded by reference
 //!   (header iovec + body iovecs) - no userspace copy on the data path. With
-//!   `--recv ring` (default) or `--recv multishot` those buffers come from a
+//!   `--recv multishot` (default) or `--recv ring` those buffers come from a
 //!   kernel-provided buffer ring, so the ring's size bounds receive memory
 //!   and an empty ring is the backpressure signal (-ENOBUFS);
 //! * outbound frames are sent with IORING_OP_SENDMSG_ZC, so a buffer stays
@@ -69,7 +69,7 @@ fn parse_args() -> Config {
         drop_policy: false,
         inflight: 2,
         max_frame: 64 << 20,
-        recv_mode: RecvMode::Ring,
+        recv_mode: RecvMode::Multishot,
         recvs: 2,
         ring_buf: 64 << 10,
         ring_entries: 1024,

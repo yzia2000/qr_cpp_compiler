@@ -1,0 +1,164 @@
+[
+ {
+  "msgs_per_s": 37703,
+  "MB_per_s": 386.1,
+  "proxy_cpu_cores": 0.93,
+  "proxy_cpu_s_per_GB": 2.409,
+  "config": "libzmq zmq_proxy",
+  "size": 10240,
+  "rep": 0
+ },
+ {
+  "msgs_per_s": 38587,
+  "MB_per_s": 395.1,
+  "proxy_cpu_cores": 0.93,
+  "proxy_cpu_s_per_GB": 2.344,
+  "config": "libzmq zmq_proxy",
+  "size": 10240,
+  "rep": 1
+ },
+ {
+  "msgs_per_s": 37460,
+  "MB_per_s": 383.6,
+  "proxy_cpu_cores": 0.93,
+  "proxy_cpu_s_per_GB": 2.414,
+  "config": "libzmq zmq_proxy",
+  "size": 10240,
+  "rep": 2
+ },
+ {
+  "msgs_per_s": 86256,
+  "MB_per_s": 883.3,
+  "proxy_cpu_cores": 0.35,
+  "proxy_cpu_s_per_GB": 0.396,
+  "config": "ring multishot, 256K bufs",
+  "size": 10240,
+  "rep": 0
+ },
+ {
+  "msgs_per_s": 89252,
+  "MB_per_s": 913.9,
+  "proxy_cpu_cores": 0.35,
+  "proxy_cpu_s_per_GB": 0.387,
+  "config": "ring multishot, 256K bufs",
+  "size": 10240,
+  "rep": 1
+ },
+ {
+  "msgs_per_s": 93754,
+  "MB_per_s": 960.0,
+  "proxy_cpu_cores": 0.36,
+  "proxy_cpu_s_per_GB": 0.371,
+  "config": "ring multishot, 256K bufs",
+  "size": 10240,
+  "rep": 2
+ },
+ {
+  "msgs_per_s": 13456,
+  "MB_per_s": 1377.9,
+  "proxy_cpu_cores": 0.77,
+  "proxy_cpu_s_per_GB": 0.562,
+  "config": "libzmq zmq_proxy",
+  "size": 102400,
+  "rep": 0
+ },
+ {
+  "msgs_per_s": 14092,
+  "MB_per_s": 1443.1,
+  "proxy_cpu_cores": 0.78,
+  "proxy_cpu_s_per_GB": 0.543,
+  "config": "libzmq zmq_proxy",
+  "size": 102400,
+  "rep": 1
+ },
+ {
+  "msgs_per_s": 12515,
+  "MB_per_s": 1281.5,
+  "proxy_cpu_cores": 0.75,
+  "proxy_cpu_s_per_GB": 0.584,
+  "config": "libzmq zmq_proxy",
+  "size": 102400,
+  "rep": 2
+ },
+ {
+  "msgs_per_s": 19476,
+  "MB_per_s": 1994.4,
+  "proxy_cpu_cores": 0.49,
+  "proxy_cpu_s_per_GB": 0.244,
+  "config": "ring multishot, 256K bufs",
+  "size": 102400,
+  "rep": 0
+ },
+ {
+  "msgs_per_s": 19573,
+  "MB_per_s": 2004.3,
+  "proxy_cpu_cores": 0.47,
+  "proxy_cpu_s_per_GB": 0.233,
+  "config": "ring multishot, 256K bufs",
+  "size": 102400,
+  "rep": 1
+ },
+ {
+  "msgs_per_s": 19675,
+  "MB_per_s": 2014.7,
+  "proxy_cpu_cores": 0.47,
+  "proxy_cpu_s_per_GB": 0.231,
+  "config": "ring multishot, 256K bufs",
+  "size": 102400,
+  "rep": 2
+ },
+ {
+  "msgs_per_s": 2532,
+  "MB_per_s": 2654.9,
+  "proxy_cpu_cores": 0.6,
+  "proxy_cpu_s_per_GB": 0.227,
+  "config": "libzmq zmq_proxy",
+  "size": 1048576,
+  "rep": 0
+ },
+ {
+  "msgs_per_s": 2152,
+  "MB_per_s": 2256.9,
+  "proxy_cpu_cores": 0.62,
+  "proxy_cpu_s_per_GB": 0.276,
+  "config": "libzmq zmq_proxy",
+  "size": 1048576,
+  "rep": 1
+ },
+ {
+  "msgs_per_s": 2607,
+  "MB_per_s": 2733.7,
+  "proxy_cpu_cores": 0.62,
+  "proxy_cpu_s_per_GB": 0.225,
+  "config": "libzmq zmq_proxy",
+  "size": 1048576,
+  "rep": 2
+ },
+ {
+  "msgs_per_s": 2504,
+  "MB_per_s": 2625.8,
+  "proxy_cpu_cores": 0.65,
+  "proxy_cpu_s_per_GB": 0.248,
+  "config": "ring multishot, 256K bufs",
+  "size": 1048576,
+  "rep": 0
+ },
+ {
+  "msgs_per_s": 2511,
+  "MB_per_s": 2633.3,
+  "proxy_cpu_cores": 0.65,
+  "proxy_cpu_s_per_GB": 0.248,
+  "config": "ring multishot, 256K bufs",
+  "size": 1048576,
+  "rep": 1
+ },
+ {
+  "msgs_per_s": 2387,
+  "MB_per_s": 2503.1,
+  "proxy_cpu_cores": 0.64,
+  "proxy_cpu_s_per_GB": 0.256,
+  "config": "ring multishot, 256K bufs",
+  "size": 1048576,
+  "rep": 2
+ }
+]

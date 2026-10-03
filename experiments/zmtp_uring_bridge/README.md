@@ -53,7 +53,8 @@ io_uring driver are about 900 lines in `src/main.rs`.
 cargo build --release
 ./target/release/zmtp-uring-bridge --front 127.0.0.1:5555 --back 127.0.0.1:5556 \
     [--zc on|off] [--budget-mb 256] [--sub-cap-mb 64] [--chunk-kb 256] \
-    [--direct-kb 64] [--policy backpressure|drop] [--inflight 2]
+    [--direct-kb 64] [--policy backpressure|drop] [--inflight 2] \
+    [--recv multishot|ring|chunk] [--recvs 2] [--ring-buf-kb 64] [--ring-entries 1024]
 
 # benchmark (needs libzmq-dev, taskset, python3)
 cd bench && for x in pub sub zproxy; do gcc -O2 -o $x $x.c -lzmq; done
@@ -128,6 +129,46 @@ baselines were re-measured alongside it; medians of 3 runs:
   publisher. Untested.
 * Zero-copy sends are unaffected; on loopback every one of them is still
   copied by the kernel.
+
+### Provided buffer ring receive (`--recv ring|multishot`)
+
+Every peer's recvs now pick buffers from one kernel-provided buffer ring
+(`IORING_REGISTER_PBUF_RING`; 1024 × 64 KiB by default). Frames are assembled
+from however many ring buffers they span and forwarded by reference; a
+buffer returns to the ring when its last reference drops. An empty ring
+(`-ENOBUFS`) parks a peer's recvs until buffers come back, so **the ring
+size is the receive-side memory bound, the HWM replacement on the way in**.
+`--recv ring --recvs K` keeps K plain recvs in flight per peer;
+`--recv multishot` uses one multishot recv. Ordering across concurrent recvs
+is checked via ring positions (the kernel consumes them in order): **0
+reorders** in every run.
+
+Copy-mode sends, `--inflight 2`; medians of 3 runs, MB/s · proxy CPU s/GB
+(`bench/results_ring.json`, `bench/results_ring_ms256.json`):
+
+| Message | direct | `zmq_proxy` | chunk recv (old) | ring, 1 recv | ring, 2 recvs | ring, 2 recvs, 256 KiB bufs | **multishot** | multishot, 256 KiB bufs |
+|---|---|---|---|---|---|---|---|---|
+| 10 KiB  | 945  | 386 · 2.39  | 908 · 0.38  | **952 · 0.37** | 928 · 0.38 | 914 · 0.39 | 905 · 0.40 | 914 · 0.39 |
+| 100 KiB | 2696 | 1461 · 0.55 | 2426 · 0.24 | 1852 · 0.36 | 2175 · 0.32 | **2490 · 0.21** | 2182 · 0.24 | 2004 · 0.23 |
+| 1 MiB   | 2576 | 2680 · 0.23 | 2248 · 0.30 | 2001 · 0.33 | 1878 · 0.34 | 2215 · 0.31 | **2748 · 0.25** | 2626 · 0.25 |
+
+* **Multishot closes the 1 MiB gap**: 2748 MB/s against 2680 for
+  `zmq_proxy`, so parity within run-to-run noise, up from 2248 for chunk
+  recv. The receive side was the 1 MiB bottleneck, as suspected.
+* **Two plain recvs per publisher did not help**: worse than one recv at
+  100 KiB and 1 MiB with 64 KiB buffers. Each completion still costs a
+  userspace round trip to re-arm, and with two outstanding, each tends to
+  return a smaller slice of the socket. Multishot removes the re-arm
+  entirely. This is a hypothesis; the per-recv sizes were not broken down.
+* **Buffer size matters at 100 KiB**: 256 KiB ring buffers with 2 recvs reach
+  2490 MB/s (best, at the lowest CPU per GB of any config), against 2175
+  with 64 KiB buffers. Multishot prefers 64 KiB buffers at 1 MiB.
+* No single configuration is best at every size. **Multishot with 64 KiB
+  buffers is now the default**: best at 1 MiB, at the ceiling at 10 KiB,
+  1.5× `zmq_proxy` at 100 KiB, and ordered by design. For 100 KiB-heavy
+  traffic, use `--recv ring --recvs 2 --ring-buf-kb 256 --ring-entries 256`.
+* With zero-copy sends, ring receive behaves like before: the kernel copies on
+  loopback anyway, so it is slower.
 
 Caveats: these are loopback numbers on a small VM with everything on 4
 cores. The PUB and SUB are libzmq in both cases, so the comparison between

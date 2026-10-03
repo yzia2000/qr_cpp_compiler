@@ -30,6 +30,7 @@ CONFIGS = {
     "ring, 2 recvs": [BRIDGE, "--zc", "off", "--recv", "ring", "--recvs", "2"],
     "ring, 2 recvs, 256K bufs": [BRIDGE, "--zc", "off", "--recv", "ring", "--recvs", "2", "--ring-buf-kb", "256", "--ring-entries", "256"],
     "ring multishot": [BRIDGE, "--zc", "off", "--recv", "multishot"],
+    "ring multishot, 256K bufs": [BRIDGE, "--zc", "off", "--recv", "multishot", "--ring-buf-kb", "256", "--ring-entries", "256"],
     "ring, 2 recvs (zc)": [BRIDGE, "--zc", "on", "--recv", "ring", "--recvs", "2"],
 }
 
