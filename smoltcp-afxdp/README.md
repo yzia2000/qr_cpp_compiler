@@ -25,12 +25,13 @@ always touch different UMEM frames. That means no `RefCell` and no runtime borro
 
 | file | what | code lines |
 |---|---|---:|
-| `src/ring.rs` | SPSC producer/consumer rings over the mmap'd kernel rings | 96 |
+| `src/ring.rs` | SPSC producer/consumer rings over the mmap'd kernel rings | 102 |
 | `src/bpf.rs` | raw `bpf(2)`: XSKMAP, a 6-instruction redirect program, attach via BPF link, map update | 141 |
-| `src/device.rs` | UMEM, socket setup and bind, `Config`, the `Device`/`RxToken`/`TxToken` impls, stats, flush | 331 |
+| `src/device.rs` | UMEM, socket setup and bind, `Config`, the `Device`/`RxToken`/`TxToken` impls, stats, flush | 326 |
 | `src/lib.rs` | re-exports | 4 |
 | **library total** | | **~570** |
-| `examples/tcp_echo.rs` | TCP echo server + ping responder, poll(2)-driven | 59 |
+| `examples/tcp_echo.rs` | TCP echo server + ping responder, poll(2)-driven | 63 |
+| `examples/smoltcp_ceiling.rs` | smoltcp-only throughput ceiling over `phy::Loopback` | 68 |
 | `scripts/veth_test.sh` | end-to-end test using a netns and a veth pair | 35 |
 
 The smoltcp-specific part (`Device` and the tokens) is only about **90 lines**. The rest is
@@ -47,10 +48,49 @@ a network namespace (Linux stack, `10.77.0.1`). It then runs:
 * an 8 MiB random-payload TCP echo, compared byte for byte with `cmp`
 
 The test passes in both generic (`XDP_FLAGS_SKB_MODE`) and native (`XDP_FLAGS_DRV_MODE`) XDP
-on kernel 6.18. One rough sanity figure: 128 MiB was echoed in ~1.2 s (≈110 MB/s each way)
-over veth with one core, a 64 KiB TCP window and no tuning. Treat it as "it isn't
-pathologically slow", not as a benchmark. veth only supports copy mode, so zero-copy on a
-real NIC (ice, i40e, mlx5) is still untested.
+on kernel 6.18. veth only supports copy mode, so zero-copy on a real NIC (ice, i40e, mlx5)
+is still untested.
+
+## Performance: what the numbers do and don't mean
+
+Measured in a 4-vCPU cloud VM (`scripts/bench_veth.sh`, `examples/smoltcp_ceiling.rs`):
+
+| setup | TCP echo throughput |
+|---|---:|
+| smoltcp ↔ smoltcp, in-process `phy::Loopback`, MTU 1514 (no syscalls, no NIC) | **23.8 Gbit/s ≈ 2.0 Mpps**, one core |
+| same, MTU 9014 | 51 Gbit/s |
+| kernel TCP ↔ kernel TCP over veth (Python echo server) | 1.9 Gbit/s |
+| kernel ↔ smoltcp/AF_XDP over veth, skb or drv mode, 64 KiB or 1 MiB buffers | 2.3–2.8 Gbit/s |
+
+* **The veth numbers say nothing about AF_XDP.** Every configuration, kernel ↔ kernel
+  included, lands at 2–3 Gbit/s. The cost is in veth, the kernel peer, `nc`, and the
+  4 shared vCPUs. veth also only supports copy mode, which is the slowest AF_XDP path. Use
+  veth for correctness only.
+* **smoltcp sets the ceiling.** It processes every 1500-byte segment individually, with no
+  TSO/GRO, and it copies payloads into socket ring buffers. AF_XDP's zero copy stops at
+  the device boundary. On one core it does about 2 Mpps ≈ 24 Gbit/s with both endpoints
+  in-process, so expect roughly **10–20 Gbit/s per core of bulk TCP** at best on a real NIC.
+  The Linux kernel does 30–50+ Gbit/s per flow with TSO/GRO, so **for bulk TCP throughput
+  this is not a win**.
+* **Where it can win: latency and packet rate for small messages.** Examples are
+  request/response traffic, UDP, and market-data style workloads. A busy-polling loop over
+  zero-copy AF_XDP skips syscalls, interrupts, and the kernel stack, so a few µs RTT on a
+  real NIC is realistic. Proving that requires an ice/i40e/mlx5 NIC in zero-copy driver
+  mode, ideally with `SO_PREFER_BUSY_POLL`, against a kernel baseline on identical hardware.
+  It can't be measured in this VM.
+
+## Loopback (`lo`) does not work, by design
+
+Attaching to `lo` succeeds, but it is useless and harmful. Tested inside a throwaway netns:
+
+* The redirect program takes **all** traffic on `lo`, so even `ping 127.0.0.1` in that
+  namespace stops working. Never do this in the host namespace.
+* `lo` has no ARP and an all-zeros MAC. smoltcp resolves neighbours with ARP, so it never
+  learns where to send replies. Frames it transmits on `lo` also loop straight back into its
+  own RX queue instead of reaching the kernel.
+
+For same-host testing, use a veth pair (as `scripts/veth_test.sh` does). For in-process
+smoltcp ↔ smoltcp, use `smoltcp::phy::Loopback`, which needs no AF_XDP at all.
 
 ```sh
 sudo ./scripts/veth_test.sh skb
@@ -69,6 +109,10 @@ sudo cargo run --release --example tcp_echo -- eth1 192.168.1.50/24 drv
   frames, which arrive in the UMEM with unfinished L4 checksums, and smoltcp rejects them.
   Fix it either with `ethtool -K <peer> tx off` (done in the test) or with
   `Config::checksum` (the example's `nocsum` flag). Real NICs deliver complete frames.
+* **Copy mode sends at most 32 frames per `sendto()`.** The rest stays on the TX ring
+  (the kernel returns `EAGAIN`), so the kick loops until the ring drains. The first version
+  kicked only once, which stalled the connection after a single large burst. The original
+  64 KiB-window test missed it; the 1 MiB-window benchmark caught it.
 * **TX wakeups.** In copy mode, every TX batch needs a `sendto()` kick. `auto_flush = false`
   plus `dev.flush()` after `iface.poll()` turns that into one syscall per poll instead of one
   per frame. The fill ring uses `XDP_USE_NEED_WAKEUP` and only calls `recvfrom()` when the

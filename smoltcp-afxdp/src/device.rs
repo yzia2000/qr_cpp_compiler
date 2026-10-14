@@ -100,7 +100,6 @@ struct TxSide {
     comp: Ring<u64>,
     free: Vec<u64>,
     auto_flush: bool,
-    pending: bool,
     scratch: Vec<u8>,
     tx_dropped: u64,
 }
@@ -229,16 +228,7 @@ impl XdpDevice {
 
         Ok(Self {
             rxs: RxSide { fd, rx, fill, frame_mask: !(cfg.frame_size as u64 - 1) },
-            txs: TxSide {
-                fd,
-                tx,
-                comp,
-                free,
-                auto_flush: cfg.auto_flush,
-                pending: false,
-                scratch: vec![0; cfg.mtu],
-                tx_dropped: 0,
-            },
+            txs: TxSide { fd, tx, comp, free, auto_flush: cfg.auto_flush, scratch: vec![0; cfg.mtu], tx_dropped: 0 },
             sock,
             umem,
             _umem_map: guard,
@@ -271,6 +261,12 @@ impl XdpDevice {
             )
         })?;
         Ok(st)
+    }
+
+    /// TX frames queued but not yet consumed by the kernel. If non-zero after `flush`,
+    /// don't sleep indefinitely: poll again soon.
+    pub fn tx_pending(&self) -> u32 {
+        self.txs.tx.unconsumed()
     }
 
     /// Kick the kernel to transmit anything queued on the TX ring (only needed with
@@ -319,14 +315,19 @@ impl TxSide {
     }
 
     fn kick(&mut self) {
-        if !self.pending {
-            return;
+        // Copy mode transmits at most 32 frames per sendto() (and returns EAGAIN if more are
+        // queued), so keep kicking until the kernel has consumed the whole TX ring. Bounded so
+        // that zero-copy mode, where the driver drains the ring asynchronously, cannot spin.
+        for _ in 0..=self.tx.size() / 32 {
+            if self.tx.unconsumed() == 0 || !self.tx.needs_wakeup() {
+                break;
+            }
+            let r = unsafe { libc::sendto(self.fd, std::ptr::null(), 0, libc::MSG_DONTWAIT, std::ptr::null(), 0) };
+            if r < 0 && !matches!(io::Error::last_os_error().raw_os_error(), Some(libc::EAGAIN | libc::EBUSY)) {
+                break;
+            }
         }
-        self.pending = false;
-        if self.tx.needs_wakeup() {
-            // EAGAIN/EBUSY/ENOBUFS just mean "try again later"; the frames stay queued.
-            unsafe { libc::sendto(self.fd, std::ptr::null(), 0, libc::MSG_DONTWAIT, std::ptr::null(), 0) };
-        }
+        self.reclaim();
     }
 }
 
@@ -384,7 +385,6 @@ impl phy::TxToken for TxToken<'_> {
         let r = f(unsafe { self.umem.frame(addr, len) });
         s.tx.push(libc::xdp_desc { addr, len: len as u32, options: 0 });
         s.tx.submit();
-        s.pending = true;
         if s.auto_flush {
             s.kick();
         }

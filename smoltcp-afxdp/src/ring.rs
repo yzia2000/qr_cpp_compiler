@@ -90,6 +90,15 @@ impl<T: Copy> Ring<T> {
         true
     }
 
+    /// Entries submitted but not yet consumed by the kernel.
+    pub fn unconsumed(&self) -> u32 {
+        self.cached_prod.wrapping_sub(self.cons().load(Ordering::Acquire))
+    }
+
+    pub fn size(&self) -> u32 {
+        self.size
+    }
+
     pub fn submit(&self) {
         self.prod().store(self.cached_prod, Ordering::Release);
     }

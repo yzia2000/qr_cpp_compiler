@@ -40,7 +40,8 @@ fn main() -> std::io::Result<()> {
     );
 
     let mut sockets = SocketSet::new(vec![]);
-    let tcp = tcp::Socket::new(tcp::SocketBuffer::new(vec![0; 65536]), tcp::SocketBuffer::new(vec![0; 65536]));
+    let bufsz: usize = std::env::var("ECHO_BUF").ok().and_then(|s| s.parse().ok()).unwrap_or(65536);
+    let tcp = tcp::Socket::new(tcp::SocketBuffer::new(vec![0; bufsz]), tcp::SocketBuffer::new(vec![0; bufsz]));
     let handle = sockets.add(tcp);
 
     loop {
@@ -66,7 +67,10 @@ fn main() -> std::io::Result<()> {
         iface.poll(Instant::now(), &mut dev, &mut sockets);
         dev.flush();
 
-        let timeout = iface.poll_delay(Instant::now(), &sockets).map(|d| d.total_millis() as i32).unwrap_or(-1);
+        let mut timeout = iface.poll_delay(Instant::now(), &sockets).map(|d| d.total_millis() as i32).unwrap_or(-1);
+        if dev.tx_pending() > 0 {
+            timeout = 1; // kernel still owes us TX progress; don't sleep on RX alone
+        }
         let mut pfd = libc::pollfd { fd: dev.as_raw_fd(), events: libc::POLLIN, revents: 0 };
         unsafe { libc::poll(&mut pfd, 1, timeout) };
     }
